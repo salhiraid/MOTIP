@@ -139,5 +139,10 @@ def runtime_option():
     parser.add_argument("--ema-warmups", type=int)
     parser.add_argument("--inference-max-shorter", type=int)
     parser.add_argument("--inference-only-detr", type=str)
+    parser.add_argument("--detr-class-indices", type=int, nargs="+", help="source class rows of the DEIM head")
+    parser.add_argument("--num-classes", type=int)
+    parser.add_argument("--num-id-vocabulary", type=int, help="ID dictionary size K")
+    parser.add_argument("--aug-base-size", type=int, help="MOTIP2 training base shorter side (multi-scale centre)")
+    parser.add_argument("--base-size-repeat", type=int)
 
     return parser.parse_args()

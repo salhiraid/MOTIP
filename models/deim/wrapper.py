@@ -70,10 +70,17 @@ class DetectionCriterion(nn.Module):
         return sum(loss_dict.values())
 
 
-def load_deim_pretrain(model: nn.Module, path: str = None, default_class_idx: int = 0, num_classes: int = 1,
-                       state: dict = None):
-    """Load an official DEIM COCO checkpoint into `DEIMDetector` (or a MOTIP model's `.detr`).
-    COCO head has 80 remapped classes (person = 0, `remap_mscoco_category: True`); slice to `num_classes`=1."""
+def load_deim_pretrain(model: nn.Module, path: str = None, default_class_idx: int = 0, num_classes: int = None,
+                       state: dict = None, class_indices=None):
+    """Load a DEIM checkpoint (official COCO, a converted custom one, or a MOTIP2 stage-1 one) into `DEIMDetector`
+    (or a MOTIP model's `.detr`).
+
+    Class-dependent tensors are `*score_head*` (num_classes x hidden) and `denoising_class_embed.weight`
+    (num_classes + 1 padding row). If their size differs from the model's they are re-built by selecting source classes:
+      * `class_indices` (list of source class rows, in the order of the target classes), e.g. COCO-80 -> the vehicle
+        classes ('bicycle','car','motorcycle','bus','truck') = [1, 2, 3, 5, 7];
+      * default: single class `default_class_idx` (COCO person = 0), as before.
+    Identical sizes load as they are (stage-1 checkpoints, converted vehicle checkpoints)."""
     if state is None:
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
         if "ema" in ckpt and isinstance(ckpt["ema"], dict) and "module" in ckpt["ema"]:
@@ -82,17 +89,20 @@ def load_deim_pretrain(model: nn.Module, path: str = None, default_class_idx: in
             state = ckpt["model"]
         else:
             state = ckpt
-    assert num_classes == 1, "only the single-class (person) head is supported"
     model_state = model.state_dict()
+    if class_indices is None:
+        class_indices = [default_class_idx]
+    class_indices = list(class_indices)
     new_state = {}
     for k, v in state.items():
-        # Slice the 80-class COCO head to the single person class only when shapes differ, so that stage-1
-        # (already single-class) checkpoints load through the same function.
         if k in model_state and v.shape != model_state[k].shape:
             if "score_head" in k:                                    # dec_score_head.*, enc_score_head
-                v = v[default_class_idx:default_class_idx + 1]
+                assert len(class_indices) == model_state[k].shape[0], \
+                    f"{k}: cannot map {v.shape[0]} source classes to {model_state[k].shape[0]} with indices {class_indices}"
+                v = v[class_indices]
             elif k.endswith("denoising_class_embed.weight"):         # (num_classes + 1 padding row, hidden)
-                v = torch.cat([v[default_class_idx:default_class_idx + 1], v[-1:]], dim=0)
+                assert len(class_indices) + 1 == model_state[k].shape[0], k
+                v = torch.cat([v[class_indices], v[-1:]], dim=0)
         new_state[k] = v
     dropped = [k for k in new_state if k not in model_state]
     # Buffers that only exist upstream when `eval_spatial_size` is fixed (we use dynamic sizes).

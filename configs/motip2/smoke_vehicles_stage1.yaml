@@ -1,0 +1,18 @@
+# CPU smoke test of the vehicle workflow on synthetic videos (tools/vehicles/make_synthetic_vehicle_videos.py). Not an experiment.
+SUPER_CONFIG_PATH: ./configs/motip2/pretrain_n_vehicles.yaml
+DEVICE: cpu
+NUM_WORKERS: 0
+PREFETCH_FACTOR: null
+BATCH_SIZE: 2
+EPOCHS: 1
+SAMPLES_PER_EPOCH: 12
+AUG_BASE_SIZE: 192
+AUG_MAX_SIZE: 320
+INFERENCE_MAX_SHORTER: 192
+INFERENCE_MAX_LONGER: 320
+BASE_SIZE_REPEAT: 2
+DETR_NUM_QUERIES: 100
+DET_THRESH: 0.0
+NEWBORN_THRESH: 0.0
+SAVE_CHECKPOINT_PER_EPOCH: 1
+EMA_WARMUPS: 0

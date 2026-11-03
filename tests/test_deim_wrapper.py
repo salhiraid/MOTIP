@@ -135,3 +135,29 @@ def test_coco_checkpoint_loading_slices_person_head(tmp_path):
     w = coco.decoder.denoising_class_embed.weight
     assert torch.equal(ours.decoder.denoising_class_embed.weight, torch.cat([w[:1], w[-1:]]))
     assert torch.equal(ours.backbone.stem.stem1.conv.weight, coco.backbone.stem.stem1.conv.weight)
+
+
+def test_coco80_to_vehicle_classes_and_5_to_5_passthrough(tmp_path):
+    """COCO-80 head -> ('bicycle','car','motorcycle','bus','truck') = rows [1,2,3,5,7]; a 5-class checkpoint loads as is."""
+    torch.manual_seed(0)
+    coco = build_deim("S", num_classes=80)
+    path = tmp_path / "coco.pth"
+    torch.save({"ema": {"module": coco.state_dict()}}, path)
+    veh = build_deim("S", num_classes=5)
+    load_deim_pretrain(veh, str(path), class_indices=[1, 2, 3, 5, 7])
+    idx = [1, 2, 3, 5, 7]
+    assert torch.equal(veh.decoder.enc_score_head.weight, coco.decoder.enc_score_head.weight[idx])
+    for a, b in zip(veh.decoder.dec_score_head, coco.decoder.dec_score_head):
+        assert torch.equal(a.bias, b.bias[idx])
+    w = coco.decoder.denoising_class_embed.weight
+    assert torch.equal(veh.decoder.denoising_class_embed.weight, torch.cat([w[idx], w[-1:]]))
+    assert torch.equal(veh.decoder.query_pos_head.layers[0].weight, coco.decoder.query_pos_head.layers[0].weight)
+    # round trip: a 5-class checkpoint (e.g. converted custom detector or a stage-1 checkpoint) needs no class_indices
+    path2 = tmp_path / "veh.pth"
+    torch.save({"model": veh.state_dict()}, path2)
+    veh2 = build_deim("S", num_classes=5)
+    load_deim_pretrain(veh2, str(path2))
+    assert all(torch.equal(a, b) for a, b in zip(veh.state_dict().values(), veh2.state_dict().values()))
+    # wrong number of indices is refused rather than silently mis-loaded
+    with pytest.raises(AssertionError):
+        load_deim_pretrain(build_deim("S", num_classes=5), str(path), class_indices=[1, 2, 3])

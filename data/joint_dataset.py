@@ -13,6 +13,7 @@ from .sportsmot import SportsMOT
 from .crowdhuman import CrowdHuman
 from .bft import BFT
 from .personpath22 import PersonPath22, PersonPath22_Inference
+from .vehicles import Vehicles
 
 
 dataset_classes = {
@@ -22,6 +23,7 @@ dataset_classes = {
     "BFT": BFT,
     "PersonPath22": PersonPath22,                        # MOTIP2 (PLAN Phase 8)
     "PersonPath22_Inference": PersonPath22_Inference,
+    "Vehicles": Vehicles,                                # vehicle tracking (tools/vehicles/)
 }
 
 

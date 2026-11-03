@@ -60,7 +60,9 @@ class RuntimeTracker:
         self.pos_dim = self.feature_dim if self.use_pos else 0
         # MOTIP2 tracklet confirmation (Paper §3.1, N_init = 2): PLAN decision N6.
         assert n_init >= 1
-        self.n_init = n_init
+        # Detector-only evaluation re-labels every detection as newborn in every frame, so nothing could ever be
+        # confirmed: tracklet confirmation only makes sense with the ID decoder.
+        self.n_init = 1 if only_detr else n_init
         self.tentative = {}         # id label -> number of consecutive hits (unconfirmed tracks)
         self.confirmed = set()
         if _id_decoder is not None and hasattr(_id_decoder, "set_rope_alpha"):
