@@ -113,3 +113,16 @@ def test_personpath22_loader_and_registry(tmp_path):
     make_sequence(str(inf), 12, 96, 160, 2, rng)
     di = dataset_classes["PersonPath22_Inference"](data_root=str(tmp_path), split="test", load_annotation=False)
     assert list(di.get_sequence_infos()) == ["vid0002"] and len(di.get_image_paths()["vid0002"]) == 12
+
+
+@pytest.mark.parametrize("size", "NS")
+def test_vehicle_configs(size):
+    c, p = load(f"{size.lower()}_vehicles.yaml"), load(f"pretrain_{size.lower()}_vehicles.yaml")
+    assert c["NUM_CLASSES"] == p["NUM_CLASSES"] == 5 and c["DATASETS"] == ["Vehicles"]
+    assert (c["INFERENCE_DATASET"], c["INFERENCE_SPLIT"]) == ("Vehicles", "valmini")      # small in-training eval split
+    assert p["DETR_PRETRAIN"].endswith(f"deim_{size.lower()}_vehicles_converted.pth")     # the user's converted detector
+    assert c["DETR_PRETRAIN"].endswith(f"deim_hgnetv2_{size.lower()}_vehicles_stage1.pth")
+    assert p["ONLY_DETR"] is True and c["ONLY_DETR"] is False and c["NUM_ID_VOCABULARY"] == 50
+    from models.motip import build as build_motip
+    model, crit = build_motip(c)
+    assert model.detr.decoder.num_classes == 5 and model.detr.decoder.dec_score_head[-1].out_features == 5

@@ -80,6 +80,24 @@ Everything else (all other ambiguities) is documented in `PLAN.md` §5.
 
 ---
 
+## 2b. Vehicle tracking on your own videos (added later)
+
+A complete workflow for a CSV-indexed collection of annotated videos (CVAT video XML) and a detector trained in mmdet is in
+**[docs/VEHICLES.md](./docs/VEHICLES.md)**. What was added for it:
+
+| Piece | File |
+|---|---|
+| CSV + CVAT-XML + video → frames, MOT-style GT, **site-disjoint train/val split**, `valmini`, statistics, K recommendation | `tools/vehicles/prepare_vehicle_dataset.py` |
+| Ground-truth overlay to check boxes/ids/classes | `tools/vehicles/visualize_gt.py` |
+| mmdet DEIM checkpoint → official-DEIM layout (tensor alignment, report, refuses incomplete conversions) | `tools/vehicles/convert_mmdet_deim.py` |
+| Multi-class (5 vehicle classes) detector head loading, e.g. COCO-80 rows `1 2 3 5 7` | `models/deim/wrapper.py` (`--detr-class-indices`) |
+| `Vehicles` dataset class (+ evaluation registration) | `data/vehicles.py` |
+| Configs | `configs/motip2/{pretrain_,}{n,s,m,l,x}_vehicles.yaml` |
+| Synthetic videos + CVAT XML for testing | `tools/vehicles/make_synthetic_vehicle_videos.py` |
+
+Quick start: prepare data (`--dry-run` first) → `visualize_gt.py` → convert detector → detection-only check → short stage 1 → stage 2 →
+evaluate on `val`; every command is in the guide. Not run on your real data/GPU; see its status box.
+
 ## 3. Installation
 
 ```bash

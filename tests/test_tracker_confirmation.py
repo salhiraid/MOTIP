@@ -150,3 +150,10 @@ def test_n_init_2_only_withholds_detections_never_adds_new_ones():
             assert sorted(map(tuple, b[t].values())) == sorted(set(map(tuple, b[t].values())))
             assert set(map(tuple, b[t].values())) <= set(map(tuple, a[t].values()))
         assert sum(len(o) for o in b) <= sum(len(o) for o in a)
+
+
+def test_detector_only_mode_ignores_n_init():
+    """In detector-only evaluation (Gate 2) every detection is newborn each frame; N_init must not suppress them."""
+    script = [[obj(t, 0.2, 0.01)] for t in range(5)]
+    _, out = run(RuntimeTracker, script, n_init=2, only_detr=True)
+    assert [len(o) for o in out] == [1] * 5

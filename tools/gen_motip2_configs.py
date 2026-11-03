@@ -34,7 +34,7 @@ BASE = {
     "TRAJECTORY_MODELING": True,       # PLAN N4
     "N_INIT_BACKFILL": False,          # PLAN N6
     # --- model ---
-    "ONLY_DETR": False, "NUM_CLASSES": 1, "DETR_NUM_QUERIES": 300, "DEIM_NUM_DENOISING": 100,
+    "ONLY_DETR": False, "NUM_CLASSES": 1, "DETR_CLASS_INDICES": None, "DETR_NUM_QUERIES": 300, "DEIM_NUM_DENOISING": 100,
     "HEAD_DIM": 32, "ID_FFN_DIM_RATIO": 4,          # ID decoder FFN ratio doubled vs MOTIP (2 -> 4) at half the width (Paper §3.1)
     "FFN_DIM_RATIO": 2,             # trajectory-feature adapter: unchanged from MOTIP (PLAN N4)
     "USE_AUX_LOSS": False, "USE_SHARED_AUX_HEAD": True, "USE_FOCAL_LOSS": False,
@@ -86,6 +86,10 @@ BENCHES = {
     "personpath22": dict(DATASETS=["PersonPath22", "CrowdHuman"], DATASET_SPLITS=["train", "train"], T=30, K=300,
                          DET=0.4, NEWBORN=0.6, INFERENCE_DATASET="PersonPath22_Inference", INFERENCE_SPLIT="test",
                          NUM_TRAINING_IDS=100),
+    # Vehicle tracking (own dataset converted from CVAT videos, tools/vehicles/). 5 detector classes, class-agnostic IDs.
+    # Training in-loop evaluation uses the small `valmini` split; the final numbers use `--inference-split val`.
+    "vehicles": dict(DATASETS=["Vehicles"], DATASET_SPLITS=["train"], T=30, K=50, DET=0.3, NEWBORN=0.7,
+                     INFERENCE_DATASET="Vehicles", INFERENCE_SPLIT="valmini", NUM_CLASSES=5),
 }
 
 
@@ -101,6 +105,7 @@ def compose(size: str, bench: str, stage: int) -> dict:
         "MISS_TOLERANCE": b["T"], "DET_THRESH": b["DET"], "NEWBORN_THRESH": b["NEWBORN"],
         "INFERENCE_DATASET": b["INFERENCE_DATASET"], "INFERENCE_SPLIT": b["INFERENCE_SPLIT"],
         "LR": lr, "LR_BACKBONE_SCALE": bb, "WEIGHT_DECAY": wd, "BASE_SIZE_REPEAT": repeat,
+        "NUM_CLASSES": b.get("NUM_CLASSES", 1),
     })
     if stage == 1:     # detector pretraining on the tracking dataset (single frames), no warmup, EMA warmup 0
         cfg.update({
@@ -110,6 +115,11 @@ def compose(size: str, bench: str, stage: int) -> dict:
             "DETR_PRETRAIN": f"./pretrains/deim_hgnetv2_{size.lower()}_coco.pth",
             "SAVE_CHECKPOINT_PER_EPOCH": 5,
         })
+        if bench == "vehicles":
+            # start from the user's own vehicle detector, converted by tools/vehicles/convert_mmdet_deim.py
+            # (5 classes already). With official COCO weights instead use: --detr-pretrain <coco.pth>
+            # --detr-class-indices 1 2 3 5 7   (COCO-80 rows of bicycle, car, motorcycle, bus, truck)
+            cfg["DETR_PRETRAIN"] = f"./pretrains/deim_{size.lower()}_vehicles_converted.pth"
     else:              # joint training of detector + ID decoder
         cfg.update({
             "SAMPLE_LENGTHS": [b["T"]], "DETR_NUM_TRAIN_FRAMES": det_frames, "BATCH_SIZE": clips,

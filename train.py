@@ -113,6 +113,7 @@ def train_engine(config: dict):
         load_deim_pretrain(
             model.detr, config["DETR_PRETRAIN"],
             default_class_idx=config["DETR_DEFAULT_CLASS_IDX"] if config.get("DETR_DEFAULT_CLASS_IDX") is not None else 0,
+            class_indices=config.get("DETR_CLASS_INDICES"),     # e.g. [1, 2, 3, 5, 7]: COCO-80 -> vehicle classes
         )
     else:
         load_detr_pretrain(
