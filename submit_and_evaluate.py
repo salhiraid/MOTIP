@@ -103,6 +103,7 @@ def submit_and_evaluate(config: dict):
         n_init=config.get("N_INIT", 1),
         rope_alpha=config.get("ROPE_ALPHA", 1.0),
         rope_alpha_mode=config.get("ROPE_ALPHA_MODE", "multiply"),
+        image_normalize=config.get("IMAGE_NORMALIZE", True),
     )
 
     if metrics is not None:
@@ -143,6 +144,7 @@ def submit_and_evaluate_one_model(
         n_init: int = 1,
         rope_alpha: float = 1.0,
         rope_alpha_mode: str = "multiply",
+        image_normalize: bool = True,
 ):
     # Build the datasets:
     inference_dataset = dataset_classes[dataset](
@@ -190,6 +192,7 @@ def submit_and_evaluate_one_model(
             max_longer=image_max_longer,
             size_divisibility=size_divisibility,
             dtype=dtype,
+            normalize=image_normalize,
         )
         sequence_loader = DataLoader(
             dataset=sequence_dataset,

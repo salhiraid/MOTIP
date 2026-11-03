@@ -1,6 +1,6 @@
 # PLAN.md — MOTIP → MOTIP2 (arXiv 2610.10391, BMVC 2026)
 
-Status: **Phase 0 complete, awaiting user approval. No model code has been edited.**
+Status: **Phase 0 approved by the user; Phases 1-8 implemented and unit-tested on CPU (see RESULTS.md for gate status). Gate 1 and all metric gates need a GPU + real data; no full training run has been started.**
 Branch: `motip2` (from `e23387c`). Skill: `motip2-implementation` (section numbers `§n` refer to it; `Paper §n` / `Tab. n` to the PDF).
 DEIM reference checkout inspected: `Intellindust-AI-Lab/DEIM @ 09d35d5` (Apache-2.0), read-only at `/home/user/intellindust-ai-lab/deim`.
 

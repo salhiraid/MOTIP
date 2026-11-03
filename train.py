@@ -39,7 +39,12 @@ def train_engine(config: dict):
         else os.path.join("./outputs/", config["EXP_NAME"])
 
     # Init Accelerator at beginning:
-    accelerator = Accelerator()
+    # MOTIP2: DDP raises if a parameter gets no gradient in a step (e.g. when switching detector heads off for an
+    # ablation); `DDP_FIND_UNUSED_PARAMETERS: true` is the escape hatch (slightly slower).
+    from accelerate.utils import DistributedDataParallelKwargs
+    accelerator = Accelerator(kwargs_handlers=[
+        DistributedDataParallelKwargs(find_unused_parameters=bool(config.get("DDP_FIND_UNUSED_PARAMETERS", False)))
+    ])
     state = PartialState()
     # Also, we set the seed:
     set_seed(config["SEED"])
@@ -276,6 +281,7 @@ def train_engine(config: dict):
                     n_init=config.get("N_INIT", 1),
                     rope_alpha=config.get("ROPE_ALPHA", 1.0),
                     rope_alpha_mode=config.get("ROPE_ALPHA_MODE", "multiply"),
+                    image_normalize=config.get("IMAGE_NORMALIZE", True),
                 )
                 eval_metrics.sync()
                 logger.metrics(

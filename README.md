@@ -73,3 +73,7 @@ If you think this project is helpful, please feel free to leave a :star: and cit
 ## :star2: Stars
 
 [![Star History Chart](https://api.star-history.com/svg?repos=MCG-NJU/MOTIP&type=Date)](https://star-history.com/#MCG-NJU/MOTIP&Date)
+
+
+## MOTIP2
+This branch also contains an implementation of MOTIP2 (DEIM detector, RoPE ID decoder, Spatial ID Switches / Loss / Anchor, tracklet confirmation). See [docs/MOTIP2.md](./docs/MOTIP2.md), `PLAN.md` and `RESULTS.md`.

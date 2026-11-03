@@ -15,7 +15,7 @@ SAVE_CHECKPOINT_PER_EPOCH: 1
 USE_EMA: true
 EMA_WARMUPS: 0
 LR_WARMUP_ITERS: 0
-DETR_PRETRAIN: /tmp/claude-0/-home-user-MOTIP/fe5c1514-00cc-5a37-a32b-066127eb6700/scratchpad/pretrains/deim_n_coco_fake.pth
+DETR_PRETRAIN: ./pretrains/deim_hgnetv2_n_coco.pth      # override with --detr-pretrain
 DETR_NUM_QUERIES: 100
 INFERENCE_MAX_SHORTER: 192
 NEWBORN_THRESH: 0.0

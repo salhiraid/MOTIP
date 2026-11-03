@@ -17,6 +17,7 @@ class SeqDataset(Dataset):
             max_longer: int = 1536,
             size_divisibility: int = 0,
             dtype=torch.float32,
+            normalize: bool = True,     # MOTIP2: False for DEIM (trained on un-normalised [0,1] images, PLAN §1.2.3)
     ):
         self.seq_info = seq_info
         self.image_paths = image_paths
@@ -29,7 +30,7 @@ class SeqDataset(Dataset):
             v2.Resize(size=self.max_shorter, max_size=self.max_longer),
             v2.ToImage(),
             v2.ToDtype(torch.float32, scale=True),
-            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            *([v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])] if normalize else []),
         ])
         return
 
