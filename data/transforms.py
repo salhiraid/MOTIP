@@ -12,6 +12,7 @@ from PIL import Image
 
 from utils.box_ops import box_xywh_to_xyxy, box_xyxy_to_cxcywh
 from .util import is_legal
+from .id_switch import apply_id_switch
 
 
 def _tv_params(transform, flat_inputs):
@@ -545,10 +546,25 @@ class TurnIntoTrajectoryAndUnknown:
             num_id_vocabulary: int,
             aug_trajectory_occlusion_prob: float,
             aug_trajectory_switch_prob: float,
+            # MOTIP2 (PLAN Phase 5). id_switch=None keeps MOTIP's behaviour: uniform iff aug_trajectory_switch_prob > 0.
+            id_switch: str | None = None,               # none | uniform | spatial
+            id_switch_sigma: float = 0.5,
+            id_switch_reference: str = "per_frame",     # per_frame | last_frame
+            id_switch_subset_prob: float | None = None,
+            id_switch_absent: str = "skip",             # skip | neg_one
+            stats=None,
     ):
         self.num_id_vocabulary = num_id_vocabulary
         self.aug_trajectory_occlusion_prob = aug_trajectory_occlusion_prob
         self.aug_trajectory_switch_prob = aug_trajectory_switch_prob
+        if id_switch is None:
+            id_switch = "uniform" if aug_trajectory_switch_prob > 0.0 else "none"
+        self.id_switch = id_switch
+        self.id_switch_sigma = id_switch_sigma
+        self.id_switch_reference = id_switch_reference
+        self.id_switch_subset_prob = aug_trajectory_switch_prob if id_switch_subset_prob is None else id_switch_subset_prob
+        self.id_switch_absent = id_switch_absent
+        self.stats = stats
         return
 
     def __call__(self, images, annotations, metas):
@@ -570,6 +586,7 @@ class TurnIntoTrajectoryAndUnknown:
         trajectory_ann_idxs = ann_idxs.clone()
         trajectory_times = times.clone()
         unknown_id_labels = id_labels.clone()
+        unknown_real_id_labels = id_labels.clone()      # MOTIP2: identity labels before the newborn overwrite (C_i)
         unknown_id_masks = id_masks.clone()
         unknown_ann_idxs = ann_idxs.clone()
         unknown_times = times.clone()
@@ -598,30 +615,20 @@ class TurnIntoTrajectoryAndUnknown:
             trajectory_id_masks = einops.rearrange(trajectory_id_masks, "(G N) T -> G T N", G=_G, N=_N)
             unknown_id_masks = einops.rearrange(unknown_id_masks, "(G N) T -> G T N", G=_G, N=_N)
 
-        if self.aug_trajectory_switch_prob > 0.0:
-            # Make trajectory switch:
-            # 1. Turn the shape into (_G * _T, _N):
-            trajectory_id_labels = einops.rearrange(trajectory_id_labels, "G T N -> (G T) N")
-            trajectory_id_masks = einops.rearrange(trajectory_id_masks, "G T N -> (G T) N")
-            trajectory_ann_idxs = einops.rearrange(trajectory_ann_idxs, "G T N -> (G T) N")
-            # 2. Switch for each frame:
-            #    (switching the ID labels is the same as switching the ann_idxs and masks)
-            for g_t in range(_G * _T):
-                switch_p = torch.ones((_N, )) * self.aug_trajectory_switch_prob
-                switch_map = torch.bernoulli(switch_p)
-                switch_idxs = torch.nonzero(switch_map)[:, 0]
-                if len(switch_idxs) > 1:    # make sure can be switched
-                    shuffled_switch_idxs = switch_idxs[torch.randperm(len(switch_idxs))]
-                    # Do switch:
-                    trajectory_ann_idxs[g_t, switch_idxs] = trajectory_ann_idxs[g_t, shuffled_switch_idxs]
-                    trajectory_id_masks[g_t, switch_idxs] = trajectory_id_masks[g_t, shuffled_switch_idxs]
-                    pass
-                pass
-            # 3. Turn the shape back:
-            trajectory_id_labels = einops.rearrange(trajectory_id_labels, "(G T) N -> G T N", G=_G, T=_T)
-            trajectory_id_masks = einops.rearrange(trajectory_id_masks, "(G T) N -> G T N", G=_G, T=_T)
-            trajectory_ann_idxs = einops.rearrange(trajectory_ann_idxs, "(G T) N -> G T N", G=_G, T=_T)
-            pass
+        if self.id_switch != "none":
+            # Make trajectory switch (MOTIP2 Sec. 3.2: `spatial` = GIoU-biased permutation, `uniform` = MOTIP's).
+            # Switching the ID labels is the same as switching the ann_idxs and masks of the slots.
+            trajectory_ann_idxs, trajectory_id_masks = apply_id_switch(
+                ann_idxs=trajectory_ann_idxs,
+                id_masks=trajectory_id_masks,
+                gt_boxes=[annotation["bbox"] for annotation in annotations],
+                mode=self.id_switch,
+                sigma=self.id_switch_sigma,
+                reference=self.id_switch_reference,
+                subset_prob=self.id_switch_subset_prob,
+                absent=self.id_switch_absent,
+                stats=self.stats,
+            )
 
         # Check all ID labels are legal:
         assert torch.all(trajectory_id_labels >= 0)
@@ -658,6 +665,7 @@ class TurnIntoTrajectoryAndUnknown:
             annotations[t]["trajectory_ann_idxs"] = trajectory_ann_idxs[:, t:t+1, :]
             annotations[t]["trajectory_times"] = trajectory_times[:, t:t+1, :]
             annotations[t]["unknown_id_labels"] = unknown_id_labels[:, t:t+1, :]
+            annotations[t]["unknown_real_id_labels"] = unknown_real_id_labels[:, t:t+1, :]
             annotations[t]["unknown_id_masks"] = unknown_id_masks[:, t:t+1, :]
             annotations[t]["unknown_ann_idxs"] = unknown_ann_idxs[:, t:t+1, :]
             annotations[t]["unknown_times"] = unknown_times[:, t:t+1, :]
@@ -740,6 +748,11 @@ def _build_motip2_transforms(config: dict):
             num_id_vocabulary=config["NUM_ID_VOCABULARY"],
             aug_trajectory_occlusion_prob=config["AUG_TRAJECTORY_OCCLUSION_PROB"],
             aug_trajectory_switch_prob=config["AUG_TRAJECTORY_SWITCH_PROB"],
+            id_switch=config["ID_SWITCH"],
+            id_switch_sigma=config["ID_SWITCH_SIGMA"],
+            id_switch_reference=config["ID_SWITCH_REFERENCE"],
+            id_switch_subset_prob=config["ID_SWITCH_SUBSET_PROB"],
+            id_switch_absent=config["ID_SWITCH_ABSENT"],
         ),
     ])
 

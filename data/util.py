@@ -97,6 +97,10 @@ def collate_fn(batch):
                     annotations[b][t]["unknown_id_labels"],
                     - torch.ones((_G, 1, max_N - _N), dtype=torch.int64)
                 ], dim=-1)
+                annotations[b][t]["unknown_real_id_labels"] = torch.cat([
+                    annotations[b][t]["unknown_real_id_labels"],
+                    - torch.ones((_G, 1, max_N - _N), dtype=torch.int64)
+                ], dim=-1)
                 annotations[b][t]["unknown_id_masks"] = torch.cat([
                     annotations[b][t]["unknown_id_masks"],
                     torch.ones((_G, 1, max_N - _N), dtype=torch.bool)

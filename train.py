@@ -488,7 +488,13 @@ def train_one_epoch(
                 part="id_decoder",
                 use_decoder_checkpoint=use_decoder_checkpoint,
             )
-            id_loss = id_criterion(id_logits=id_logits, id_labels=id_gts, id_masks=id_masks)
+            id_loss = id_criterion(
+                id_logits=id_logits, id_labels=id_gts, id_masks=id_masks,
+                extra={
+                    "pred_boxes": seq_info["unknown_boxes"], "gt_boxes": seq_info["unknown_gt_boxes"],
+                    "gt_present": seq_info["unknown_gt_present"], "real_id_labels": seq_info["unknown_real_id_labels"],
+                },
+            )
             _num_gts_per_frame = max(_num_gts_per_frame, id_gts.shape[-1])
             # print(f"Num of GTs per frame: {_num_gts_per_frame}")
             pass
@@ -510,6 +516,8 @@ def train_one_epoch(
             metrics.update(name="detr_loss", value=detr_loss.item())
             if id_loss is not None:
                 metrics.update(name="id_loss", value=id_loss.item())
+                for _k, _v in id_criterion.last_terms.items():
+                    metrics.update(name=_k, value=_v)
             for k, v in detr_loss_dict.items():
                 if is_deim and any(t in k for t in ("_aux_", "_dn_", "_enc_", "_pre")):
                     continue        # log only the final-layer terms
@@ -825,6 +833,10 @@ def prepare_for_motip(detr_outputs, annotations, detr_indices, with_pos: bool = 
     unknown_masks = torch.ones((_B, _G, _T, _N), dtype=torch.bool, device=_device)
     unknown_boxes = torch.zeros((_B, _G, _T, _N, 4), dtype=torch.float32, device=_device)
     unknown_features = torch.zeros((_B, _G, _T, _N, _feature_dim), dtype=torch.float32, device=_device)
+    # MOTIP2 Spatial ID Loss (Paper Sec. 3.3): GT boxes of the identities present in each frame and their real labels.
+    unknown_gt_boxes = torch.zeros((_B, _G, _T, _N, 4), dtype=torch.float32, device=_device)
+    unknown_gt_present = torch.zeros((_B, _G, _T, _N), dtype=torch.bool, device=_device)
+    unknown_real_id_labels = - torch.ones((_B, _G, _T, _N), dtype=torch.int64, device=_device)
     if with_pos:    # MOTIP2 Spatial Anchor: p_i of every detection token (same layout as the features)
         trajectory_pos = torch.zeros((_B, _G, _T, _N, _feature_dim), dtype=torch.float32, device=_device)
         unknown_pos = torch.zeros((_B, _G, _T, _N, _feature_dim), dtype=torch.float32, device=_device)
@@ -846,6 +858,10 @@ def prepare_for_motip(detr_outputs, annotations, detr_indices, with_pos: bool = 
                 # Fill the fields:
                 trajectory_id_labels[b, group, t] = annotations[b][t]["trajectory_id_labels"][group, 0, :]
                 unknown_id_labels[b, group, t] = annotations[b][t]["unknown_id_labels"][group, 0, :]
+                unknown_real_id_labels[b, group, t] = annotations[b][t]["unknown_real_id_labels"][group, 0, :]
+                _gt_present = _curr_unk_ann_idxs >= 0           # GT presence BEFORE random occlusion masking (PLAN N3b)
+                unknown_gt_present[b, group, t] = _gt_present
+                unknown_gt_boxes[b, group, t, _gt_present] = annotations[b][t]["bbox"].to(_device)[_curr_unk_ann_idxs[_gt_present]]
                 trajectory_times[b, group, t] = annotations[b][t]["trajectory_times"][group, 0, :]
                 unknown_times[b, group, t] = annotations[b][t]["unknown_times"][group, 0, :]
                 trajectory_masks[b, group, t] = _curr_traj_masks
@@ -872,6 +888,9 @@ def prepare_for_motip(detr_outputs, annotations, detr_indices, with_pos: bool = 
         "unknown_masks": unknown_masks,
         "unknown_boxes": unknown_boxes,
         "unknown_features": unknown_features,
+        "unknown_gt_boxes": unknown_gt_boxes,
+        "unknown_gt_present": unknown_gt_present,
+        "unknown_real_id_labels": unknown_real_id_labels,
     }
 
 
