@@ -157,3 +157,73 @@ def test_detector_only_mode_ignores_n_init():
     script = [[obj(t, 0.2, 0.01)] for t in range(5)]
     _, out = run(RuntimeTracker, script, n_init=2, only_detr=True)
     assert [len(o) for o in out] == [1] * 5
+
+
+def test_unconfirmed_track_ttl_keeps_the_identity_across_a_gap_but_still_requires_consecutive_hits():
+    A = (0.3, 0.5, 0.05, 0.1, 0.9)
+    script = [[A], [], [A], [A], [A]]            # hit, miss, hit, hit, hit
+    t0, out0 = run(RuntimeTracker, script, n_init=2, n_init_ttl=0)
+    t2, out2 = run(RuntimeTracker, script, n_init=2, n_init_ttl=2)
+    # ttl=0: the track from frame 0 dies at the miss; the re-appearance is a NEW track, confirmed on its 2nd hit (frame 3)
+    assert [len(o) for o in out0] == [0, 0, 0, 1, 1]
+    # ttl=2: the tentative track survives the gap in the context (same slot is re-identified), but the miss reset the
+    # consecutive-hit counter: hit(2) -> hits=1, hit(3) -> hits=2 -> confirmed at frame 3 with the ORIGINAL identity
+    assert [len(o) for o in out2] == [0, 0, 0, 1, 1]
+    ids0 = {i for o in out0 for i in o}; ids2 = {i for o in out2 for i in o}
+    assert len(ids0) == 1 and len(ids2) == 1
+    assert next(iter(ids2)) == 0 and next(iter(ids0)) == 1          # ttl=2 kept id 0; ttl=0 had to start a new id (1)
+    # a gap longer than the ttl discards the track
+    script = [[A], [], [], [], [A], [A]]
+    _, out = run(RuntimeTracker, script, n_init=2, n_init_ttl=2)
+    assert [len(o) for o in out] == [0, 0, 0, 0, 0, 1] and next(iter(out[-1])) != 0
+
+
+def _bare_tracker(label_row, id_thresh=0.1, protocol="object-max"):
+    tr = RuntimeTracker(model=StubModel([[]]), sequence_hw=(100, 100), assignment_protocol=protocol,
+                        miss_tolerance=30, det_thresh=0.5, newborn_thresh=0.5, id_thresh=id_thresh)
+    tr.trajectory_id_labels = torch.tensor([label_row])          # identities currently in the context (row 0)
+    return tr
+
+
+@pytest.mark.parametrize("protocol", ["object-max", "id-max", "hungarian"])
+def test_greedy_readout_gives_unique_known_confident_identities(protocol):
+    """Paper §3.1 'greedy protocol converts predicted distributions into unique identity assignments' with a minimum
+    identity probability lambda_ID (0.1): no identity is used twice, unknown identities are never assigned, and every
+    assigned identity has probability >= lambda_ID; everything else is the newborn class K."""
+    g = torch.Generator().manual_seed(0)
+    known = [0, 3, 4, 7]
+    tr = _bare_tracker(known, id_thresh=0.1, protocol=protocol)
+    for _ in range(300):
+        M = int(torch.randint(1, 9, (1,), generator=g))
+        scores = torch.softmax(3 * torch.randn(M, K + 1, generator=g), dim=-1)
+        labels = {"object-max": tr._object_max_assignment, "id-max": tr._id_max_assignment,
+                  "hungarian": tr._hungarian_assignment}[protocol](scores)
+        assert len(labels) == M
+        used = [l for l in labels if l != K]
+        assert len(used) == len(set(used)), (protocol, labels)                         # unique
+        assert set(used) <= set(known)                                                 # only identities that exist
+        for i, l in enumerate(labels):
+            if l != K:
+                assert scores[i, l] >= 0.1 - 1e-9                                      # lambda_ID
+
+
+def test_object_max_gives_the_identity_to_the_most_confident_object():
+    tr = _bare_tracker([2, 5], id_thresh=0.1)
+    s = torch.full((3, K + 1), 0.001)
+    s[0, 2], s[1, 2], s[2, 5] = 0.9, 0.6, 0.8            # objects 0 and 1 both want id 2; 0 is more confident
+    s = s / s.sum(-1, keepdim=True)
+    assert tr._object_max_assignment(s) == [2, K, 5]
+
+
+def test_fifo_context_never_exceeds_the_miss_tolerance():
+    T = 10
+    script = [[obj(t, 0.1, 0.005), obj(t, 0.6, -0.005, y=0.2)] for t in range(60)]
+    tracker = RuntimeTracker(model=StubModel(script), sequence_hw=(100, 100), assignment_protocol="object-max",
+                             miss_tolerance=T, det_thresh=0.5, newborn_thresh=0.5, id_thresh=0.1, n_init=2)
+    sizes = []
+    for t in range(len(script)):
+        tracker.update(image=t)
+        sizes.append(tracker.trajectory_features.shape[0])
+    assert max(sizes) <= T and sizes[-1] >= T - 2                  # a bounded FIFO that is actually full in steady state
+    ids = {i for t in range(len(script)) for i in tracker.get_track_results()["id"].tolist()}
+    assert len(tracker.get_track_results()["id"]) == 2

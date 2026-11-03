@@ -22,7 +22,7 @@ ID_FUSION=concat, N_INIT=1` reproduces MOTIP's decoder/augmentation/tracker exac
 ```bash
 pip install torch torchvision einops scipy pyyaml pillow accelerate wandb pytest   # DEIM needs no CUDA extension
 python tools/gen_motip2_configs.py           # regenerates configs/motip2/*.yaml from the paper's numbers
-python -m pytest tests -q                    # CPU unit gates 2-8
+python -m pytest tests -q -m "not slow"        # CPU tests (drop -m to include the end-to-end/DDP/learning ones)
 ```
 DEIM COCO checkpoints (official, Google Drive links in the DEIM README) go to `./pretrains/deim_hgnetv2_{n,s,m,l,x}_coco.pth`.
 Datasets: DanceTrack / SportsMOT / CrowdHuman as in `docs/DATASET.md`; PersonPath22 as MOT-style folders, see `data/personpath22.py`.

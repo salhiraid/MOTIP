@@ -17,6 +17,7 @@ BASE = {
     "SPATIAL_ANCHOR": True,
     "POS_ENC": "rope",                 # learned_rel | rope
     "N_INIT": 2,
+    "N_INIT_TTL": 0,                   # unconfirmed-track lifetime in missed frames (0 = discard at first miss)
     "DETECTOR": "deim",                # deformable_detr | deim
     # --- additional switches (PLAN §3.2) ---
     "ID_FUSION": "add",                # add | concat

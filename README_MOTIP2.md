@@ -4,8 +4,8 @@ This branch (`motip2`) turns the existing MOTIP (CVPR 2025) codebase into **MOTI
 *"MOTIP2: Spatial Priors for End-to-End Multi-Object Tracking"* (arXiv 2610.10391, BMVC 2026). The original MOTIP README
 is [README.md](./README.md); everything below is about what was added on top of it.
 
-> **Honest status.** All code is written and unit-tested (106 CPU tests pass) and the full pipeline (data → training →
-> tracker → TrackEval) runs end to end on a *synthetic* dataset. It has **not** been run on a GPU, on real
+> **Honest status.** All code is written and tested (169 CPU tests incl. behavioural, integration, 2-process DDP and ONNX-parity tests; see
+> [AUDIT.md](./AUDIT.md)) and the full pipeline (data → training → tracker → TrackEval) runs end to end on a *synthetic* dataset. It has **not** been run on a GPU, on real
 > DanceTrack/SportsMOT/PersonPath22 data, or with real DEIM weights, so **no number from the paper has been reproduced yet**.
 > Gate-by-gate status is kept in [RESULTS.md](./RESULTS.md); the full plan, every design decision and the target numbers
 > are in [PLAN.md](./PLAN.md).
@@ -123,7 +123,7 @@ Original MOTIP install notes are in [docs/INSTALL.md](./docs/INSTALL.md).
 ## 5. Quick checks (no GPU, no data needed)
 
 ```bash
-python -m pytest tests -q                       # 106 tests, ~30 s on CPU
+python -m pytest tests -q -m "not slow"           # fast subset, ~5 min on CPU (drop -m to include the ~10 min of end-to-end tests)
 python tools/make_synthetic_dancetrack.py --out /tmp/synth        # tiny fake DanceTrack-format dataset
 # end-to-end smoke: stage 1 (detector only) ...
 python train.py --config-path configs/motip2/smoke_stage1.yaml --data-root /tmp/synth \
@@ -168,7 +168,8 @@ Per-GPU batch sizes in the configs assume the paper's 4 GPUs; with other hardwar
 | `--id-loss-spatial` | `True` | add the GIoU/L1 terms |
 | `--spatial-anchor` | `True` | add `p_i` to detection tokens |
 | `--pos-enc` | `rope` | `rope` / `learned_rel` |
-| `--n-init` | `2` | tracklet confirmation length (1 = off) |
+| `--n-init` | `2` | tracklet confirmation length (1 = off; forced to 1 in detector-only evaluation) |
+| `--n-init-ttl` | `0` | missed frames an *unconfirmed* track survives (0 = discard at first miss, Paper; >0 = skill §9.4 "after the miss tolerance") |
 | `--detector` | `deim` | `deim` / `deformable_detr` |
 | `--rope-alpha`, `--rope-alpha-mode` | `2.0`, `multiply` | inference timescale rescale (`multiply` / `divide`) |
 | `--id-switch-reference` | `per_frame` | or `last_frame` |
@@ -201,6 +202,23 @@ then `python tools/aggregate_results.py` prints mean ± std per variant.
 | `tools/log_result.py`, `tools/aggregate_results.py` | Maintain `RESULTS.md` and aggregate seeds |
 | `tools/make_synthetic_dancetrack.py` | Synthetic dataset for smoke tests |
 
+## 8b. Export to ONNX (Phase 10)
+
+```bash
+python tools/export_onnx.py --config configs/motip2/s_dancetrack.yaml --ckpt outputs/s_dancetrack/checkpoint_9.pth \
+    --out-dir export/s --height 800 --width 1440 --verify
+```
+Writes `detector.onnx` (fixed resolution) and `id_decoder.onnx` (**dynamic** number of context frames, tracks and detections; RoPE α baked in),
+plus `export_meta.json`. `--verify` compares both with PyTorch through onnxruntime (ID decoder at 5 different shapes, detector set-wise).
+`tools/onnx_runtime_model.py` runs the existing `RuntimeTracker` on the two graphs (greedy readout / confirmation / context buffer stay in
+Python, as in the paper) and the tests check it tracks identically to PyTorch. **TensorRT engines are not built** (no TensorRT/GPU in the
+development environment); the ONNX graphs are the input for `trtexec`.
+
+## 8c. Distributed testing without GPUs
+
+`torchrun --nproc_per_node 2 --master_addr 127.0.0.1 tools/ddp_cpu_launch.py train.py <usual flags>` runs the real multi-process (gloo) code
+paths on CPU: sharded sampling, DDP gradient sync, EMA under DDP, metric gathering, sharded evaluation.
+
 ## 9. Repository map (new / changed)
 
 ```
@@ -212,22 +230,33 @@ data/id_switch.py       Spatial ID Switches + statistics       data/personpath22
 data/transforms.py      zoom-out, IoU-crop, MOTIP2 pipeline    data/util.py           batch multi-scale
 train.py                two-stage loop, EMA, param groups, DEIM step
 configs/motip2/         30 generated configs + 2 smoke configs
-tests/                  106 tests (+ frozen copies of the original decoder/tracker used as references)
+tests/                  169 tests (+ frozen copies of the original decoder/tracker used as references)
 ```
 
-## 10. Verification status
+## 10. Verification status (details and the full requirement → test map: [AUDIT.md](./AUDIT.md))
 
-| Gate | Unit tests (CPU) | Metric on real data |
-|---|---|---|
-| 1 Baseline MOTIP = 64.0 HOTA (DanceTrack val) | — | **not run** |
-| 2 DEIM detector | 12 pass (param counts vs DEIM README, `p_i` location, dynamic sizes, COCO-head slicing) | DetA / latency **not run** |
-| 3 RoPE + decoder | 16 pass (relative-offset invariance, additive fusion, **bit-identical to original decoder** in concat+learned_rel mode, masks, α inference-only) | α sweep **not run** |
-| 4 Spatial Anchor | 7 pass (off = Phase-3 input bit-for-bit, on = +`p_i` exactly, no new parameters) | **not run** |
-| 5 Spatial ID Switches | 15 pass (valid permutation, σ→∞ = uniform, far pairs don't swap, uniform = original code) | Table-8 stats **not run** |
-| 6 Spatial ID Loss | 9 pass (Σp=1 over `C_i`, newborn = own GT, `b̂` detached, weights 1/2/5) | **not run** |
-| 7 Tracker | 10 pass (`N_init` logic, **`N_INIT=1` identical to original tracker**) | Table-9 sweep **not run** |
-| 8 Configs + smoke | 37 pass (configs vs paper numbers, ordering of the DEIM step, augmentation validity) + CPU synthetic smoke | GPU smoke **not run** |
-| 9 Ablations | — | **not started — needs your compute-budget confirmation** |
+**169 automated tests** (CPU, `python -m pytest tests -q`; `-m "not slow"` skips the ~10 minutes of end-to-end/learning tests).
+They are graded: **EXACT** (against the spec or the original MOTIP code, bit-for-bit), **BEHAVIOUR** (a trained model must show the
+claimed effect, with a control that removes the mechanism and must fail) and **WIRING** (the flag reaches the module).
+
+| Claim | Evidence |
+|---|---|
+| Decoder with `ID_FUSION=concat POS_ENC=learned_rel` and tracker with `N_INIT=1` ≡ original MOTIP | EXACT (frozen copies of the original code) |
+| Spatial Anchor works | BEHAVIOUR: identically-looking objects are separated **98 %** with `p_i` vs **24 %** (chance 25 %) without |
+| RoPE gives the decoder a usable temporal notion | BEHAVIOUR: **95–98 %** (5/5 inits) vs **25 %** with the rotation removed; the legacy learned bias is init-sensitive on the same task |
+| Spatial ID Loss does what Eq. (1)–(2) say | EXACT values + BEHAVIOUR: expected localisation cost −10 %, errors land on nearer objects (costs accuracy at heavy noise) |
+| Spatial ID Switches are implemented as in §3.2 | EXACT (permutations, σ→∞ ≡ uniform, uniform ≡ original code, live Tab. 8 statistics). **Their benefit is not demonstrable on a toy** — needs the real Tab. 5 ablation |
+| Detection loss pipeline learns | BEHAVIOUR: DEIM-N overfits 4 images: best-match IoU **0.22 → 0.98**, confidence 0.02 → 0.96 |
+| Tracking stack (buffer, ids, readout, confirmation, RoPE times, anchor) is train/inference consistent | BEHAVIOUR with a *trained* decoder + oracle detections, real `RuntimeTracker`, TrackEval: **HOTA 100** (n_init=1), 97.5 (n_init=2), 96.3 with 3-frame occlusions, 0 identity switches; untrained control **HOTA 71.6, 49 IDSW** |
+| ONNX export | EXACT parity 2e-6 (ID decoder, dynamic T/N/M) and detector; exported graphs track identically inside the real tracker |
+| Distributed + resume | real 2-process gloo DDP training + sharded eval + EMA + resume (found and fixed a deadlock and a CUDA-only reduction) |
+| Vehicle data tool | converter GT equals generator truth to 0.01 px; strict pixel test (box filled and tight); TrackEval scores GT as a perfect tracker (HOTA 100) |
+| Docs | every command in the docs parses against the real parsers (negative controls included) |
+
+**Not verified (needs a GPU / real data / TensorRT):** MOTIP baseline reproduction (Gate 1), every paper number (Tab. 1–10), latency
+(Tab. 4), TensorRT FP16 engines, detector quality on real benchmarks, the benefit of Spatial ID Switches, end-to-end accuracy
+(an attempt to train from random weights on CPU was inconclusive: box loss fell but no detections reached the threshold, and ID
+cross-entropy was still near chance — documented in `RESULTS.md`).
 
 ## 11. Known limitations / things to check first on a GPU
 

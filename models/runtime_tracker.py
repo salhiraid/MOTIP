@@ -29,6 +29,7 @@ class RuntimeTracker:
             dtype: torch.dtype = torch.float32,
             # MOTIP2:
             n_init: int = 1,
+            n_init_ttl: int = 0,
             rope_alpha: float = 1.0,
             rope_alpha_mode: str = "multiply",
     ):
@@ -63,7 +64,11 @@ class RuntimeTracker:
         # Detector-only evaluation re-labels every detection as newborn in every frame, so nothing could ever be
         # confirmed: tracklet confirmation only makes sense with the ID decoder.
         self.n_init = 1 if only_detr else n_init
-        self.tentative = {}         # id label -> number of consecutive hits (unconfirmed tracks)
+        # `n_init_ttl`: how many consecutive frames an unconfirmed track may be missed before it is discarded.
+        # 0 (default, Paper "discarded"): discard at the first miss. >0 (skill §9.4 "after the miss tolerance"):
+        # keep it in the context for up to that many missed frames; a miss still resets the CONSECUTIVE hit count.
+        self.n_init_ttl = n_init_ttl
+        self.tentative = {}         # id label -> [consecutive hits, consecutive misses] (unconfirmed tracks)
         self.confirmed = set()
         if _id_decoder is not None and hasattr(_id_decoder, "set_rope_alpha"):
             _id_decoder.set_rope_alpha(rope_alpha, rope_alpha_mode)       # inference-only RoPE timescale rescaling
@@ -204,10 +209,12 @@ class RuntimeTracker:
                 if self.n_init <= 1:
                     self.confirmed.add(label)
                 else:
-                    self.tentative[label] = 1
+                    self.tentative[label] = [1, 0]
             elif label in self.tentative:           # consistent re-assignment of a tentative track
-                self.tentative[label] += 1
-                if self.tentative[label] >= self.n_init:
+                st = self.tentative[label]
+                st[0] = 1 if st[1] > 0 else st[0] + 1      # a miss in between breaks the "consecutive" requirement
+                st[1] = 0
+                if st[0] >= self.n_init:
                     del self.tentative[label]
                     self.confirmed.add(label)
             else:                                   # already confirmed (or legacy N_INIT=1 behaviour)
@@ -218,7 +225,13 @@ class RuntimeTracker:
     def _discard_unconfirmed_misses(self, present_id_labels: set):
         """Evict tentative tracks that were not re-identified in this frame: remove their embeddings from the context
         buffer (keeps the history clean) and return their dictionary slot to the front of the free queue."""
-        gone = [label for label in self.tentative if label not in present_id_labels]
+        gone = []
+        for label, st in self.tentative.items():
+            if label in present_id_labels:
+                continue
+            st[1] += 1
+            if st[1] > self.n_init_ttl:
+                gone.append(label)
         if len(gone) == 0:
             return
         if self.trajectory_id_labels.shape[0] > 0:

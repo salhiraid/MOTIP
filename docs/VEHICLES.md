@@ -23,7 +23,7 @@ mmdet DEIM-S checkpoint ──(3) convert───▶ pretrains/deim_s_vehicles_
 ```bash
 pip install torch torchvision einops scipy pyyaml pillow accelerate wandb pytest pandas
 sudo apt-get install ffmpeg            # used for decoding; no OpenCV needed
-python -m pytest tests -q              # 125 tests, CPU, ~1 min  (sanity of your install)
+python -m pytest tests -q -m "not slow"  # 150+ tests, CPU, ~5 min  (sanity of your install)
 ```
 
 ## 1. Preprocess: dry run (reads only the CSV + XML, writes nothing)

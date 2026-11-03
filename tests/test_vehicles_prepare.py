@@ -172,23 +172,37 @@ def test_boxes_follow_the_moving_objects(prepared):
 
 
 def test_rendered_object_is_where_the_box_says(prepared):
-    """Pixel check: the (distinctly coloured) object is inside its box in the decoded JPEG."""
+    """Pixel check on the decoded JPEGs: the box is FILLED by the object and TIGHT (the band just outside it is background).
+    Uses isolated objects (no other GT box within 10 px) so overlaps cannot confuse the check; requires >= 5 such cases."""
     import numpy as np
     from PIL import Image
     _, root, _ = prepared
-    d = root / "val" / sorted(os.listdir(root / "val"))[0]
-    row = next(l.strip().split(",") for l in open(d / "gt" / "gt_classes.txt") if l.startswith("10,"))
-    x, y, w, h = map(float, row[2:6])
-    img = np.asarray(Image.open(d / "img1" / "00000010.jpg").convert("RGB")).astype(float)
+
     def fg(region):                                    # fraction of pixels that differ from the grey background (45)
-        return float((np.abs(region - 45.0).max(-1) > 35).mean()) if region.size else 0.0
-    inside = img[int(y + 3):int(y + h - 3), int(x + 3):int(x + w - 3)]
-    assert fg(inside) > 0.9                            # the object fills its box ...
-    # ... and the box is tight: a same-size window shifted far away from the box is mostly background
-    H_, W_ = img.shape[:2]
-    cx = int(x + w / 2)
-    far = img[int(y + h) + 4:int(y + h) + 4 + int(h * 0.5), max(0, cx - 3):cx + 3] if y + h + 4 + h * 0.5 < H_ else img[:0]
-    assert fg(far) < 0.8 or far.size == 0
+        return float((np.abs(region - 45.0).max(-1) > 35).mean())
+
+    checked = 0
+    for seq in sorted(os.listdir(root / "val")) + sorted(os.listdir(root / "train")):
+        d = root / ("val" if (root / "val" / seq).exists() else "train") / seq
+        for frame in (5, 10, 20):
+            boxes = [tuple(map(float, l.split(",")[2:6])) for l in open(d / "gt" / "gt_classes.txt") if int(l.split(",")[0]) == frame]
+            ign = [tuple(map(float, l.split(",")[2:6])) for l in open(d / "gt" / "gt.txt")
+                   if l.split(",")[7] == "8" and int(l.split(",")[0]) == frame]
+            img = np.asarray(Image.open(d / "img1" / f"{frame:08d}.jpg").convert("RGB")).astype(float)
+            H, W = img.shape[:2]
+            for i, (x, y, w, h) in enumerate(boxes):
+                others = [b for j, b in enumerate(boxes) if j != i] + ign
+                m = 10
+                free = all(x + w + m < ox or ox + ow + m < x or y + h + m < oy or oy + oh + m < y for ox, oy, ow, oh in others)
+                if not free or x < 8 or y < 8 or x + w > W - 8 or y + h > H - 8:
+                    continue
+                inside = img[int(y + 3):int(y + h - 3), int(x + 3):int(x + w - 3)]
+                above = img[int(y) - 7:int(y) - 3, int(x):int(x + w)]
+                below = img[int(y + h) + 3:int(y + h) + 7, int(x):int(x + w)]
+                assert fg(inside) > 0.9, (seq, frame, "box not filled by the object")
+                assert fg(above) < 0.25 and fg(below) < 0.25, (seq, frame, "box not tight / misplaced")
+                checked += 1
+    assert checked >= 5, checked
 
 
 def test_vehicles_dataset_class_loads_classes_and_legality(prepared):
