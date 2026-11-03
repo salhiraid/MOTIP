@@ -139,7 +139,7 @@ def load_detr_pretrain(model: nn.Module, pretrain_path: str, num_classes: int | 
     return
 
 
-def save_checkpoint(model, path, states: dict, optimizer, scheduler, only_detr: bool = False):
+def save_checkpoint(model, path, states: dict, optimizer, scheduler, only_detr: bool = False, ema=None):
     if is_main_process():   # only save the model in the main process.
         model = get_model(model)
         if only_detr:
@@ -150,16 +150,31 @@ def save_checkpoint(model, path, states: dict, optimizer, scheduler, only_detr: 
             "scheduler": scheduler.state_dict() if scheduler is not None else None,
             "states": states,
         }
+        if ema is not None:     # MOTIP2 App. A: EMA decay 0.9995; evaluation/inference use the EMA weights.
+            ema_model = ema.module.detr if only_detr else ema.module
+            save_state["ema"] = {"module": ema_model.state_dict(), "updates": ema.updates}
         torch.save(save_state, path)
     return
 
 
-def load_checkpoint(model, path, states=None, optimizer=None, scheduler=None):
+def load_checkpoint(model, path, states=None, optimizer=None, scheduler=None, use_ema: bool = True, ema=None):
+    """`use_ema=True`: if the checkpoint carries EMA weights (MOTIP2), load them as the model (inference).
+    For resuming training pass `use_ema=False` and `ema` to also restore the EMA module."""
     load_state = torch.load(path, map_location=lambda storage, loc: storage, weights_only=False)
     model_state = load_state["model"]
+    if use_ema and "ema" in load_state and load_state["ema"] is not None:
+        model_state = load_state["ema"]["module"]
+    if ema is not None and "ema" in load_state and load_state["ema"] is not None:
+        ema.module.load_state_dict(load_state["ema"]["module"])
+        ema.updates = load_state["ema"].get("updates", 0)
 
     if "bbox_embed.0.layers.0.weight" in model_state:
         load_detr_pretrain(model=model, pretrain_path=path, num_classes=None)
+        return
+    elif any(k.startswith("decoder.dec_score_head") for k in model_state):
+        # MOTIP2: detector-only (stage-1) DEIM checkpoint.
+        from models.deim.wrapper import load_deim_pretrain
+        load_deim_pretrain(get_model(model).detr, state=model_state)
         return
     else:
         model.load_state_dict(model_state)
@@ -178,7 +193,8 @@ def _get_clones(module, N):
 
 
 def get_model(model):
-    return model.module if is_distributed() else model
+    # `hasattr` (not `is_distributed()`) so that unwrapped modules, e.g. the EMA copy, are returned as-is.
+    return model.module if hasattr(model, "module") else model
 
 # For previous version of MOTIP models:
 def load_previous_checkpoint(model, path, states=None, optimizer=None, scheduler=None):

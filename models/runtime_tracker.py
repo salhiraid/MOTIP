@@ -49,6 +49,7 @@ class RuntimeTracker:
         self.area_thresh = area_thresh
         self.only_detr = only_detr
         self.num_id_vocabulary = get_model(model).num_id_vocabulary
+        self.feature_dim = getattr(get_model(model).detr, "hidden_dim", 256)    # DEIM-N: 128 (was hard-coded 256)
 
         # Check for the legality of settings:
         assert self.assignment_protocol in ["hungarian", "id-max", "object-max", "object-priority", "id-priority"], \
@@ -69,7 +70,7 @@ class RuntimeTracker:
             self.id_queue.add(i)
         # All fields are in shape (T, N, ...)
         self.trajectory_features = torch.zeros(
-            (0, 0, 256), dtype=dtype, device=distributed_device(),
+            (0, 0, self.feature_dim), dtype=dtype, device=distributed_device(),
         )
         self.trajectory_boxes = torch.zeros(
             (0, 0, 4), dtype=dtype, device=distributed_device(),
@@ -278,7 +279,7 @@ class RuntimeTracker:
                 torch.arange(_T, dtype=torch.int64, device=distributed_device()), 't -> t n', n=_N,
             )
             _features = torch.zeros(
-                (_T, _N, 256), dtype=self.dtype, device=distributed_device(),
+                (_T, _N, self.feature_dim), dtype=self.dtype, device=distributed_device(),
             )
             _masks = torch.ones((_T, _N), dtype=torch.bool, device=distributed_device())
             # 3.1. padding to trajectory infos:
@@ -290,7 +291,7 @@ class RuntimeTracker:
         # 4. update trajectory infos:
         _N = self.trajectory_id_labels.shape[1]
         current_id_labels = self.trajectory_id_labels[0] if self.trajectory_id_labels.shape[0] > 0 else id_labels
-        current_features = torch.zeros((_N, 256), dtype=self.dtype, device=distributed_device())
+        current_features = torch.zeros((_N, self.feature_dim), dtype=self.dtype, device=distributed_device())
         current_boxes = torch.zeros((_N, 4), dtype=self.dtype, device=distributed_device())
         current_times = self.trajectory_id_labels.shape[0] * torch.ones((_N,), dtype=torch.int64, device=distributed_device())
         current_masks = torch.ones((_N,), dtype=torch.bool, device=distributed_device())

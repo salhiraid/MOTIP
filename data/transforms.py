@@ -9,10 +9,20 @@ from torchvision.transforms import v2
 import torchvision.transforms as T
 from math import floor
 from PIL import Image
-from triton.language import dtype
 
 from utils.box_ops import box_xywh_to_xyxy, box_xyxy_to_cxcywh
 from .util import is_legal
+
+
+def _tv_params(transform, flat_inputs):
+    """torchvision >= 0.22 renamed `_get_params` -> `make_params` and `_transform` -> `transform`."""
+    fn = getattr(transform, "make_params", None) or transform._get_params
+    return fn(flat_inputs)
+
+
+def _tv_apply(transform, inpt, params):
+    fn = getattr(transform, "transform", None) or transform._transform
+    return fn(inpt, params)
 
 
 class MultiIdentity:
@@ -279,6 +289,86 @@ class MultiRandomCrop:
             return images, annotations, metas
 
 
+class MultiRandomZoomOut:
+    """MOTIP2 Paper App. A: random zoom-out p=0.5, scale in [1.0, 2.0] (DEIM RandomZoomOut semantics).
+    The same canvas/offset is used for every frame of the clip. Boxes are (x1, y1, x2, y2) in pixels."""
+    def __init__(self, p: float = 0.5, scale_range=(1.0, 2.0), fill: int = 0):
+        self.p, self.scale_range, self.fill = p, scale_range, fill
+
+    def __call__(self, images, annotations, metas):
+        if random.random() >= self.p:
+            return images, annotations, metas
+        assert isinstance(images, list) and isinstance(images[0], Image.Image)
+        w, h = images[0].size
+        r = random.uniform(*self.scale_range)
+        cw, ch = int(round(w * r)), int(round(h * r))
+        left, top = random.randint(0, cw - w), random.randint(0, ch - h)
+        new_images = []
+        for im in images:
+            canvas = Image.new(im.mode, (cw, ch), (self.fill,) * len(im.getbands()) if len(im.getbands()) > 1 else self.fill)
+            canvas.paste(im, (left, top))
+            new_images.append(canvas)
+        shift = torch.as_tensor([left, top, left, top], dtype=torch.float32)
+        for annotation in annotations:
+            annotation["bbox"] = annotation["bbox"] + shift
+        return new_images, annotations, metas
+
+
+class MultiRandomIoUCrop:
+    """MOTIP2 Paper App. A: IoU-aware random crop p=0.8, scale [0.3, 1.0], aspect ratio [1.5, 2.0].
+    Sampling follows torchvision.RandomIoUCrop on the first frame; the crop is then shared by the whole clip and
+    accepted only if every frame keeps a legal annotation. Boxes are (x1, y1, x2, y2) in pixels."""
+    def __init__(self, p: float = 0.8, min_scale: float = 0.3, max_scale: float = 1.0,
+                 min_aspect_ratio: float = 1.5, max_aspect_ratio: float = 2.0,
+                 sampler_options=(0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0), trials: int = 40):
+        self.p, self.min_scale, self.max_scale = p, min_scale, max_scale
+        self.min_ar, self.max_ar = min_aspect_ratio, max_aspect_ratio
+        self.options, self.trials = list(sampler_options), trials
+
+    @staticmethod
+    def _crop_annotation(annotation, left, top, cw, ch):
+        a = copy.copy(annotation)
+        boxes = annotation["bbox"]
+        centers = (boxes[:, :2] + boxes[:, 2:]) / 2
+        keep = (centers[:, 0] > left) & (centers[:, 0] < left + cw) & (centers[:, 1] > top) & (centers[:, 1] < top + ch)
+        boxes = boxes[keep] - torch.as_tensor([left, top, left, top], dtype=torch.float32)
+        boxes[:, 0::2] = boxes[:, 0::2].clamp(0, cw)
+        boxes[:, 1::2] = boxes[:, 1::2].clamp(0, ch)
+        ok = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+        keep_idx = torch.nonzero(keep)[:, 0][ok]
+        a["bbox"] = boxes[ok]
+        for f in ["category", "id", "visibility"]:
+            a[f] = annotation[f][keep_idx]
+        a["is_legal"] = is_legal(a)
+        return a
+
+    def __call__(self, images, annotations, metas):
+        if random.random() >= self.p:
+            return images, annotations, metas
+        assert isinstance(images, list) and isinstance(images[0], Image.Image)
+        w, h = images[0].size
+        from torchvision.ops import box_iou
+        boxes0 = annotations[0]["bbox"]
+        while True:
+            min_jaccard = self.options[random.randrange(len(self.options))]
+            if min_jaccard >= 1.0:
+                return images, annotations, metas
+            for _ in range(self.trials):
+                r = self.min_scale + (self.max_scale - self.min_scale) * torch.rand(2)
+                cw, ch = int(w * r[0]), int(h * r[1])
+                if cw < 1 or ch < 1 or not (self.min_ar <= cw / ch <= self.max_ar):
+                    continue
+                left, top = int(torch.randint(0, w - cw + 1, (1,))), int(torch.randint(0, h - ch + 1, (1,)))
+                crop = torch.as_tensor([[left, top, left + cw, top + ch]], dtype=torch.float32)
+                if len(boxes0) == 0 or box_iou(boxes0, crop).max() < min_jaccard:
+                    continue
+                cropped = [self._crop_annotation(a, left, top, cw, ch) for a in annotations]
+                if not all(a["is_legal"] for a in cropped):
+                    continue
+                images = [im.crop((left, top, left + cw, top + ch)) for im in images]
+                return images, cropped, metas
+
+
 class MultiColorJitter:
     def __init__(
             self,
@@ -299,8 +389,8 @@ class MultiColorJitter:
             images = self.color_jitter(images)
         elif isinstance(images, list):
             assert isinstance(images[0], Image.Image)
-            params = self.color_jitter._get_params([images[0]])
-            images = [self.color_jitter._transform(_, params=params) for _ in images]
+            params = _tv_params(self.color_jitter, [images[0]])
+            images = [_tv_apply(self.color_jitter, _, params) for _ in images]
         else:
             raise NotImplementedError(f"The input image type {type(images)} is not supported.")
         return images, annotations, metas
@@ -311,8 +401,8 @@ class MultiRandomPhotometricDistort:
         self.ramdom_photometric_distort = v2.RandomPhotometricDistort()
 
     def __call__(self, images, annotations, metas):
-        _params = self.ramdom_photometric_distort._get_params([images[0]])
-        images = [self.ramdom_photometric_distort._transform(_, _params) for _ in images]
+        _params = _tv_params(self.ramdom_photometric_distort, [images[0]])
+        images = [_tv_apply(self.ramdom_photometric_distort, _, _params) for _ in images]
         return images, annotations, metas
 
 
@@ -578,6 +668,8 @@ class TurnIntoTrajectoryAndUnknown:
 def build_transforms(config: dict):
     # mean = [0.485, 0.456, 0.406]
     # std = [0.229, 0.224, 0.225]
+    if config.get("AUG_PIPELINE", "legacy") == "motip2":
+        return _build_motip2_transforms(config)
     return MultiCompose([
         MultiBoxXYWHtoXYXY(),
         MultiSimulate(max_shift_ratio=config["AUG_MAX_SHIFT_RATIO"], overflow_bbox=config["AUG_OVERFLOW_BBOX"]),
@@ -608,6 +700,37 @@ def build_transforms(config: dict):
         # MultiNormalize(mean=mean, std=std),
         MultiNormalizeBoundingBoxes(),
         # For MOTIP, biding ID labels:
+        GenerateIDLabels(
+            num_id_vocabulary=config["NUM_ID_VOCABULARY"],
+            aug_num_groups=config["AUG_NUM_GROUPS"],
+            num_training_ids=config.get("NUM_TRAINING_IDS", config["NUM_ID_VOCABULARY"]),
+        ),
+        TurnIntoTrajectoryAndUnknown(
+            num_id_vocabulary=config["NUM_ID_VOCABULARY"],
+            aug_trajectory_occlusion_prob=config["AUG_TRAJECTORY_OCCLUSION_PROB"],
+            aug_trajectory_switch_prob=config["AUG_TRAJECTORY_SWITCH_PROB"],
+        ),
+    ])
+
+
+def _build_motip2_transforms(config: dict):
+    """MOTIP2 Paper App. A image pipeline (multi-scale is applied per batch, see data/util.py:batch_multiscale):
+    flip p=0.5 -> zoom-out p=0.5 [1,2] -> IoU-crop p=0.8 [0.3,1] aspect [1.5,2] -> resize to base (shorter
+    AUG_BASE_SIZE, longer <= AUG_MAX_SIZE) -> photometric p=0.5 (brightness .875-1.125, contrast/saturation .5-1.5,
+    hue +-.05 = torchvision v2.RandomPhotometricDistort defaults)."""
+    return MultiCompose([
+        MultiBoxXYWHtoXYXY(),
+        MultiSimulate(max_shift_ratio=config["AUG_MAX_SHIFT_RATIO"], overflow_bbox=config["AUG_OVERFLOW_BBOX"]),
+        MultiStack(),
+        MultiRandomHorizontalFlip(p=0.5),
+        MultiRandomZoomOut(p=0.5, scale_range=(1.0, 2.0)),
+        MultiRandomIoUCrop(p=0.8, min_scale=0.3, max_scale=1.0, min_aspect_ratio=1.5, max_aspect_ratio=2.0),
+        MultiRandomResize(sizes=[config["AUG_BASE_SIZE"]], max_size=config["AUG_MAX_SIZE"]),
+        MultiBoxXYXYtoCXCYWH(),
+        MultiRandomPhotometricDistort(),
+        MultiToTensor(),
+        MultiStack(),
+        MultiNormalizeBoundingBoxes(),
         GenerateIDLabels(
             num_id_vocabulary=config["NUM_ID_VOCABULARY"],
             aug_num_groups=config["AUG_NUM_GROUPS"],

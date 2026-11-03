@@ -10,7 +10,7 @@ from accelerate.state import PartialState
 from torch.utils.data import DataLoader
 
 from runtime_option import runtime_option
-from utils.misc import yaml_to_dict
+from utils.misc import yaml_to_dict, distributed_device
 from configs.util import load_super_config, update_config
 from log.logger import Logger
 from data.joint_dataset import dataset_classes
@@ -87,7 +87,8 @@ def submit_and_evaluate(config: dict):
         dataset=config["INFERENCE_DATASET"],
         data_split=config["INFERENCE_SPLIT"],
         outputs_dir=outputs_dir,
-        image_max_longer=config["INFERENCE_MAX_LONGER"],    # the max shorter side of the image is set to 800 by default
+        image_max_shorter=config.get("INFERENCE_MAX_SHORTER", 800),     # Paper §4.1: shorter side 800, longer <= 1440
+        image_max_longer=config["INFERENCE_MAX_LONGER"],
         size_divisibility=config.get("SIZE_DIVISIBILITY", 0),
         use_sigmoid=config.get("USE_FOCAL_LOSS", False),
         assignment_protocol=config.get("ASSIGNMENT_PROTOCOL", "hungarian"),
@@ -357,8 +358,8 @@ def get_results_of_one_sequence(
     for t, (image, image_path) in enumerate(sequence_loader):
         if t == 10:
             begin_time = time.time()
-        image.tensors = image.tensors.cuda()
-        image.mask = image.mask.cuda()
+        image.tensors = image.tensors.to(distributed_device())      # (was .cuda(); CPU-safe for smoke tests)
+        image.mask = image.mask.to(distributed_device())
         # image = nested_tensor_from_tensor_list(tensor_list=[image[0]])
         runtime_tracker.update(image=image)
         _results = runtime_tracker.get_track_results()

@@ -2,12 +2,11 @@
 
 from .motip import MOTIP
 from structures.args import Args
-from models.deformable_detr.deformable_detr import build as build_deformable_detr
 from models.motip.trajectory_modeling import TrajectoryModeling
 from models.motip.id_decoder import IDDecoder
 
 
-def build(config: dict):
+def build_legacy_detr(config: dict):
     # Generate DETR args:
     detr_args = Args()
     # 1. backbone:
@@ -39,13 +38,27 @@ def build(config: dict):
     detr_args.set_cost_class = config["DETR_SET_COST_CLASS"]
     detr_args.set_cost_bbox = config["DETR_SET_COST_BBOX"]
     detr_args.set_cost_giou = config["DETR_SET_COST_GIOU"]
+    from models.deformable_detr.deformable_detr import build as build_deformable_detr
+    detr, detr_criterion, _ = build_deformable_detr(args=detr_args)
+    return detr, detr_criterion
 
-    detr_framework = config["DETR_FRAMEWORK"].lower()
+
+def build(config: dict):
+    # MOTIP2 flag `DETECTOR: deformable_detr | deim` (falls back to the legacy DETR_FRAMEWORK key).
+    detr_framework = str(config.get("DETECTOR", config.get("DETR_FRAMEWORK", "deformable_detr"))).lower()
     match detr_framework:
         case "deformable_detr":
-            detr, detr_criterion, _ = build_deformable_detr(args=detr_args)
+            detr, detr_criterion = build_legacy_detr(config)
+        case "deim":
+            from models.deim.builder import build_deim, build_detection_criterion
+            detr = build_deim(
+                size=config["MODEL_SIZE"], num_classes=config["NUM_CLASSES"],
+                num_queries=config["DETR_NUM_QUERIES"], num_denoising=config.get("DEIM_NUM_DENOISING", 100),
+                anchor_source=config.get("SPATIAL_ANCHOR_SOURCE", "layer_input"),
+            )
+            detr_criterion = build_detection_criterion(num_classes=config["NUM_CLASSES"])
         case _:
-            raise NotImplementedError(f"DETR framework {config['DETR_FRAMEWORK']} is not supported.")
+            raise NotImplementedError(f"DETR framework {detr_framework} is not supported.")
 
     # Build each component:
     # 1. trajectory modeling (currently, only FFNs are used):

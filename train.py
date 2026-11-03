@@ -2,6 +2,7 @@
 
 import os
 import math
+import random
 import torch
 import einops
 from accelerate import Accelerator
@@ -21,10 +22,12 @@ from configs.util import load_super_config, update_config
 from log.logger import Logger
 from data import build_dataset
 from data.naive_sampler import NaiveSampler
-from data.util import collate_fn
+from data.util import collate_fn, generate_scales, batch_multiscale
 from log.log import TPS, Metrics
 from models.misc import load_detr_pretrain, save_checkpoint, load_checkpoint
 from models.misc import get_model
+from models.deim.ema import ModelEMA
+from models.deim.wrapper import load_deim_pretrain
 from utils.nested_tensor import NestedTensor
 from submit_and_evaluate import submit_and_evaluate_one_model
 
@@ -77,6 +80,7 @@ def train_engine(config: dict):
         sample_intervals=config["SAMPLE_INTERVALS"],
         length_per_iteration=config["LENGTH_PER_ITERATION"],
         data_weights=data_weights,
+        samples_per_epoch=config.get("SAMPLES_PER_EPOCH", None),
     )
     # Build training data loader:
     train_dataloader = DataLoader(
@@ -97,11 +101,19 @@ def train_engine(config: dict):
 
     # Build MOTIP model:
     model, detr_criterion = build_motip(config=config)
+    is_deim = model.detr_framework == "deim"
     # Load the pre-trained DETR:
-    load_detr_pretrain(
-        model=model, pretrain_path=config["DETR_PRETRAIN"], num_classes=config["NUM_CLASSES"],
-        default_class_idx=config["DETR_DEFAULT_CLASS_IDX"] if "DETR_DEFAULT_CLASS_IDX" in config else None,
-    )
+    if is_deim:
+        # COCO weights (stage 1) or the stage-1 tracking-dataset checkpoint (stage 2); 80-class head sliced to person.
+        load_deim_pretrain(
+            model.detr, config["DETR_PRETRAIN"],
+            default_class_idx=config["DETR_DEFAULT_CLASS_IDX"] if config.get("DETR_DEFAULT_CLASS_IDX") is not None else 0,
+        )
+    else:
+        load_detr_pretrain(
+            model=model, pretrain_path=config["DETR_PRETRAIN"], num_classes=config["NUM_CLASSES"],
+            default_class_idx=config["DETR_DEFAULT_CLASS_IDX"] if "DETR_DEFAULT_CLASS_IDX" in config else None,
+        )
     logger.success(
         log=f"Load the pre-trained DETR from '{config['DETR_PRETRAIN']}'. "
     )
@@ -113,17 +125,21 @@ def train_engine(config: dict):
         for n, p in model.named_parameters():
             if "detr" in n:
                 p.requires_grad = False     # only train the MOTIP part.
-    param_groups = get_param_groups(model, config)
+    param_groups = get_param_groups_motip2(model, config) if is_deim else get_param_groups(model, config)
     optimizer = AdamW(
         params=param_groups,
         lr=config["LR"],
         weight_decay=config["WEIGHT_DECAY"],
+        betas=(0.9, 0.999),
     )
-    scheduler = MultiStepLR(
-        optimizer=optimizer,
-        milestones=config["SCHEDULER_MILESTONES"],
-        gamma=config["SCHEDULER_GAMMA"],
-    )
+    if config.get("LR_SCHEDULER", "multistep") == "constant":
+        scheduler = None        # MOTIP2 App. A: constant learning rate in both stages
+    else:
+        scheduler = MultiStepLR(
+            optimizer=optimizer,
+            milestones=config["SCHEDULER_MILESTONES"],
+            gamma=config["SCHEDULER_GAMMA"],
+        )
 
     # Other infos:
     only_detr = config["ONLY_DETR"]
@@ -134,11 +150,14 @@ def train_engine(config: dict):
             model=model,
             path=config["RESUME_MODEL"],
             optimizer=optimizer if config["RESUME_OPTIMIZER"] else None,
-            scheduler=scheduler if config["RESUME_SCHEDULER"] else None,
+            scheduler=scheduler if (config["RESUME_SCHEDULER"] and scheduler is not None) else None,
             states=train_states,
+            use_ema=False,
         )
         # Different processing on scheduler:
-        if config["RESUME_SCHEDULER"]:
+        if scheduler is None:
+            pass
+        elif config["RESUME_SCHEDULER"]:
             scheduler.step()
         else:
             for _ in range(0, train_states["start_epoch"]):
@@ -155,6 +174,18 @@ def train_engine(config: dict):
         train_dataloader, model, optimizer,
         # device_placement=[False]        # whether to place the data on the device
     )
+
+    # MOTIP2 App. A: EMA with decay 0.9995 (warmup 0 in stage 1, 1000 steps in joint training).
+    ema = None
+    if config.get("USE_EMA", False):
+        ema = ModelEMA(get_model(model), decay=config.get("EMA_DECAY", 0.9995), warmups=config.get("EMA_WARMUPS", 1000))
+        if config["RESUME_MODEL"] is not None:
+            _resume = torch.load(config["RESUME_MODEL"], map_location="cpu", weights_only=False)
+            if _resume.get("ema") is not None:
+                ema.module.load_state_dict(_resume["ema"]["module"])
+                ema.updates = _resume["ema"].get("updates", 0)
+            del _resume
+        logger.info(f"EMA enabled: decay={ema.decay}, warmups={ema.warmups}, updates={ema.updates}.")
 
     for epoch in range(train_states["start_epoch"], config["EPOCHS"]):
         logger.info(log=f"Start training epoch {epoch}.")
@@ -187,6 +218,8 @@ def train_engine(config: dict):
             outputs_dir=outputs_dir,
             is_last_epochs=(epoch == config["EPOCHS"] - 1),
             multi_last_checkpoints=config["MULTI_LAST_CHECKPOINTS"],
+            config=config,
+            ema=ema,
         )
 
         # Get learning rate:
@@ -214,6 +247,7 @@ def train_engine(config: dict):
                 optimizer=optimizer,
                 scheduler=scheduler,
                 only_detr=only_detr,
+                ema=ema,
             )
             if config["INFERENCE_DATASET"] is not None:
                 assert config["INFERENCE_SPLIT"] is not None, f"Please set the INFERENCE_SPLIT for inference."
@@ -222,11 +256,12 @@ def train_engine(config: dict):
                     accelerator=accelerator,
                     state=state,
                     logger=logger,
-                    model=model,
+                    model=ema.module if ema is not None else model,     # evaluate the EMA weights (MOTIP2)
                     data_root=config["DATA_ROOT"],
                     dataset=config["INFERENCE_DATASET"],
                     data_split=config["INFERENCE_SPLIT"],
                     outputs_dir=os.path.join(outputs_dir, "train", "eval_during_train", f"epoch_{epoch}"),
+                    image_max_shorter=config.get("INFERENCE_MAX_SHORTER", 800),
                     image_max_longer=config["INFERENCE_MAX_LONGER"],
                     size_divisibility=config.get("SIZE_DIVISIBILITY", 0),
                     miss_tolerance=config["MISS_TOLERANCE"],
@@ -253,7 +288,8 @@ def train_engine(config: dict):
 
         logger.success(log=f"Finish training epoch {epoch}.")
         # Prepare for next step:
-        scheduler.step()
+        if scheduler is not None:
+            scheduler.step()
     pass
 
 
@@ -284,7 +320,17 @@ def train_one_epoch(
         outputs_dir: str = None,
         is_last_epochs: bool = False,
         multi_last_checkpoints: int = 0,
+        # MOTIP2:
+        config: dict | None = None,
+        ema=None,
 ):
+    config = config if config is not None else {}
+    is_deim = get_model(model).detr_framework == "deim"
+    image_normalize = config.get("IMAGE_NORMALIZE", True)
+    lr_warmup_iters = config.get("LR_WARMUP_ITERS", 0)
+    multiscale = None
+    if config.get("AUG_MULTISCALE", False):
+        multiscale = generate_scales(config["AUG_BASE_SIZE"], config["BASE_SIZE_REPEAT"])
     current_last_checkpoint_idx = 0
 
     model.train()
@@ -313,13 +359,21 @@ def train_one_epoch(
         mean = [0.485, 0.456, 0.406]
         std = [0.229, 0.224, 0.225]
         images.tensors = v2.functional.to_dtype(images.tensors, dtype=torch.float32, scale=True)
-        images.tensors = v2.functional.normalize(images.tensors, mean=mean, std=std)
+        if multiscale is not None:
+            # MOTIP2 App. A multi-scale: one scale per batch, shared by all frames of all clips (PLAN N5).
+            images = batch_multiscale(images, scale_factor=random.choice(multiscale) / config["AUG_BASE_SIZE"])
+        if image_normalize:     # DEIM is trained on un-normalised [0,1] images (PLAN §1.2 item 3)
+            images.tensors = v2.functional.normalize(images.tensors, mean=mean, std=std)
         # A hack implementation to recover 0.0 in the masked regions:
         images.tensors = images.tensors * (~images.mask[:, :, None, ...]).to(torch.float32)
         images.tensors = images.tensors.contiguous()
 
         # Learning rate warmup:
-        if epoch < lr_warmup_epochs:
+        if lr_warmup_iters > 0:
+            if states["global_step"] < lr_warmup_iters:     # MOTIP2: 500-iteration linear warmup (stage 2)
+                lr_warmup_by_iters(optimizer, curr_iter=states["global_step"], tgt_lr=lr_warmup_tgt_lr,
+                                   warmup_iters=lr_warmup_iters)
+        elif epoch < lr_warmup_epochs:
             # Do warmup:
             lr_warmup(
                 optimizer=optimizer,
@@ -330,86 +384,92 @@ def train_one_epoch(
         _B, _T = len(annotations), len(annotations[0])
         detr_num_train_frames = min(detr_num_train_frames, _T)
 
-        # Prepare the DETR targets from the annotations:
-        detr_targets_flatten = annotations_to_flatten_detr_targets(annotations=annotations, device=device)
+        if is_deim:
+            detr_outputs, detr_loss_dict, detr_indices = deim_detr_forward(
+                model=model, detr_criterion=detr_criterion, images=images, annotations=annotations, device=device,
+                num_train_frames=detr_num_train_frames, num_no_grad_chunk=detr_num_checkpoint_frames * 4,
+            )
+        else:
+            # Prepare the DETR targets from the annotations:
+            detr_targets_flatten = annotations_to_flatten_detr_targets(annotations=annotations, device=device)
 
-        # Select the training and no_grad frames:
-        random_frame_idxs = torch.randperm(_T, device=device)   # use these random indices to select the frames.
-        go_back_frame_idxs = torch.argsort(random_frame_idxs)   # use these indices to go back to the original order.
-        go_back_frame_idxs_flatten = torch.cat([
-            go_back_frame_idxs + _T * b for b in range(_B)
-        ])      # only used for the DETR's criterion.
-        # Split random_frame_idxs into training and no_grad frame indices:
-        detr_train_frame_idxs = random_frame_idxs[:detr_num_train_frames]
-        detr_no_grad_frame_idxs = random_frame_idxs[detr_num_train_frames:]
+            # Select the training and no_grad frames:
+            random_frame_idxs = torch.randperm(_T, device=device)   # use these random indices to select the frames.
+            go_back_frame_idxs = torch.argsort(random_frame_idxs)   # use these indices to go back to the original order.
+            go_back_frame_idxs_flatten = torch.cat([
+                go_back_frame_idxs + _T * b for b in range(_B)
+            ])      # only used for the DETR's criterion.
+            # Split random_frame_idxs into training and no_grad frame indices:
+            detr_train_frame_idxs = random_frame_idxs[:detr_num_train_frames]
+            detr_no_grad_frame_idxs = random_frame_idxs[detr_num_train_frames:]
 
-        detr_outputs_flatten_idxs = torch.arange(_B * _T, device=device)
-        detr_outputs_flatten_idxs = einops.rearrange(detr_outputs_flatten_idxs, "(b t) -> b t", b=_B)
-        detr_outputs_flatten_idxs = torch.cat([
-            einops.rearrange(detr_outputs_flatten_idxs[:, :detr_num_train_frames], "b t -> (b t)"),
-            einops.rearrange(detr_outputs_flatten_idxs[:, detr_num_train_frames:], "b t -> (b t)"),
-        ], dim=0)
-        detr_outputs_flatten_go_back_idxs = torch.argsort(detr_outputs_flatten_idxs)
-        pass
-        # Select the training and no_grad frames:
-        detr_train_frames = nested_tensor_index_select(images, dim=1, index=detr_train_frame_idxs)
-        detr_no_grad_frames = nested_tensor_index_select(images, dim=1, index=detr_no_grad_frame_idxs)
+            detr_outputs_flatten_idxs = torch.arange(_B * _T, device=device)
+            detr_outputs_flatten_idxs = einops.rearrange(detr_outputs_flatten_idxs, "(b t) -> b t", b=_B)
+            detr_outputs_flatten_idxs = torch.cat([
+                einops.rearrange(detr_outputs_flatten_idxs[:, :detr_num_train_frames], "b t -> (b t)"),
+                einops.rearrange(detr_outputs_flatten_idxs[:, detr_num_train_frames:], "b t -> (b t)"),
+            ], dim=0)
+            detr_outputs_flatten_go_back_idxs = torch.argsort(detr_outputs_flatten_idxs)
+            pass
+            # Select the training and no_grad frames:
+            detr_train_frames = nested_tensor_index_select(images, dim=1, index=detr_train_frame_idxs)
+            detr_no_grad_frames = nested_tensor_index_select(images, dim=1, index=detr_no_grad_frame_idxs)
 
-        # Prepare for the DETR forward function, turn the (B, T, ...) images to (B*T, ...) (or said flatten):
-        detr_train_frames.tensors = einops.rearrange(detr_train_frames.tensors, "b t c h w -> (b t) c h w").contiguous()
-        detr_train_frames.mask = einops.rearrange(detr_train_frames.mask, "b t h w -> (b t) h w").contiguous()
-        detr_no_grad_frames.tensors = einops.rearrange(detr_no_grad_frames.tensors, "b t c h w -> (b t) c h w").contiguous()
-        detr_no_grad_frames.mask = einops.rearrange(detr_no_grad_frames.mask, "b t h w -> (b t) h w").contiguous()
+            # Prepare for the DETR forward function, turn the (B, T, ...) images to (B*T, ...) (or said flatten):
+            detr_train_frames.tensors = einops.rearrange(detr_train_frames.tensors, "b t c h w -> (b t) c h w").contiguous()
+            detr_train_frames.mask = einops.rearrange(detr_train_frames.mask, "b t h w -> (b t) h w").contiguous()
+            detr_no_grad_frames.tensors = einops.rearrange(detr_no_grad_frames.tensors, "b t c h w -> (b t) c h w").contiguous()
+            detr_no_grad_frames.mask = einops.rearrange(detr_no_grad_frames.mask, "b t h w -> (b t) h w").contiguous()
 
-        # TODO: For DeNoise (e.g., in DINO-DETR),
-        #       need to split the detr_targets_flatten into training and no_grad parts.
+            # TODO: For DeNoise (e.g., in DINO-DETR),
+            #       need to split the detr_targets_flatten into training and no_grad parts.
 
-        # DETR forward:
-        # 1. no_grad frames:
-        if _T > detr_num_train_frames:      # do have no_grad frames (if not, skip this part)
-            with torch.no_grad():
-                if detr_num_checkpoint_frames == 0 or detr_num_checkpoint_frames * 4 >= len(detr_no_grad_frames):
-                    # Directly forward the no_grad frames:
-                    detr_no_grad_outputs = model(frames=detr_no_grad_frames, part="detr")
+            # DETR forward:
+            # 1. no_grad frames:
+            if _T > detr_num_train_frames:      # do have no_grad frames (if not, skip this part)
+                with torch.no_grad():
+                    if detr_num_checkpoint_frames == 0 or detr_num_checkpoint_frames * 4 >= len(detr_no_grad_frames):
+                        # Directly forward the no_grad frames:
+                        detr_no_grad_outputs = model(frames=detr_no_grad_frames, part="detr")
+                    else:
+                        # Split the no_grad frames into batched iterations (reduce the memory usage):
+                        detr_no_grad_outputs = None
+                        for batch_samples in batch_iterator(
+                            detr_num_checkpoint_frames * 4,
+                            detr_no_grad_frames,
+                        ):
+                            batch_frames = batch_samples[0]
+                            _ = model(frames=batch_frames, part="detr")
+                            detr_no_grad_outputs = tensor_dict_cat(detr_no_grad_outputs, _, dim=0)
+            else:                               # no no_grad frames
+                detr_no_grad_outputs = None
+
+            # 2. training frames:
+            if detr_num_train_frames > 0:
+                if detr_num_checkpoint_frames == 0 or detr_num_checkpoint_frames >= len(detr_train_frames):
+                    # Directly forward the training frames:
+                    detr_train_outputs = model(frames=detr_train_frames, part="detr")
                 else:
-                    # Split the no_grad frames into batched iterations (reduce the memory usage):
-                    detr_no_grad_outputs = None
+                    # Split the training frames into batched iterations (reduce the memory usage):
+                    detr_train_outputs = None
                     for batch_samples in batch_iterator(
-                        detr_num_checkpoint_frames * 4,
-                        detr_no_grad_frames,
+                        detr_num_checkpoint_frames,
+                        detr_train_frames,
                     ):
                         batch_frames = batch_samples[0]
-                        _ = model(frames=batch_frames, part="detr")
-                        detr_no_grad_outputs = tensor_dict_cat(detr_no_grad_outputs, _, dim=0)
-        else:                               # no no_grad frames
-            detr_no_grad_outputs = None
-
-        # 2. training frames:
-        if detr_num_train_frames > 0:
-            if detr_num_checkpoint_frames == 0 or detr_num_checkpoint_frames >= len(detr_train_frames):
-                # Directly forward the training frames:
-                detr_train_outputs = model(frames=detr_train_frames, part="detr")
+                        _ = model(frames=batch_frames, part="detr", use_checkpoint=True)
+                        detr_train_outputs = tensor_dict_cat(detr_train_outputs, _, dim=0)
             else:
-                # Split the training frames into batched iterations (reduce the memory usage):
                 detr_train_outputs = None
-                for batch_samples in batch_iterator(
-                    detr_num_checkpoint_frames,
-                    detr_train_frames,
-                ):
-                    batch_frames = batch_samples[0]
-                    _ = model(frames=batch_frames, part="detr", use_checkpoint=True)
-                    detr_train_outputs = tensor_dict_cat(detr_train_outputs, _, dim=0)
-        else:
-            detr_train_outputs = None
 
-        # Combine training and no_grad outputs:
-        detr_outputs = tensor_dict_cat(detr_train_outputs, detr_no_grad_outputs, dim=0)
-        # Recover the order of the outputs:
-        detr_outputs = tensor_dict_index_select(detr_outputs, index=detr_outputs_flatten_go_back_idxs, dim=0)
-        detr_outputs = tensor_dict_index_select(detr_outputs, index=go_back_frame_idxs_flatten, dim=0)
+            # Combine training and no_grad outputs:
+            detr_outputs = tensor_dict_cat(detr_train_outputs, detr_no_grad_outputs, dim=0)
+            # Recover the order of the outputs:
+            detr_outputs = tensor_dict_index_select(detr_outputs, index=detr_outputs_flatten_go_back_idxs, dim=0)
+            detr_outputs = tensor_dict_index_select(detr_outputs, index=go_back_frame_idxs_flatten, dim=0)
 
-        # DETR criterion:
-        detr_loss_dict, detr_indices = detr_criterion(outputs=detr_outputs, targets=detr_targets_flatten, batch_len=detr_criterion_batch_len)
+            # DETR criterion:
+            detr_loss_dict, detr_indices = detr_criterion(outputs=detr_outputs, targets=detr_targets_flatten, batch_len=detr_criterion_batch_len)
 
         # Whether to only train the DETR, OR to train the MOTIP together:
         if not only_detr:
@@ -433,10 +493,13 @@ def train_one_epoch(
 
         # Backward:
         with accelerator.autocast():
-            detr_weight_dict = detr_criterion.weight_dict
-            detr_loss = sum(
-                detr_loss_dict[k] * detr_weight_dict[k] for k in detr_loss_dict.keys() if k in detr_weight_dict
-            )
+            if is_deim:     # DEIMCriterion applies its own weight_dict (MAL 1, L1 5, GIoU 2, FGL .15, DDF 1.5)
+                detr_loss = detr_criterion.total(detr_loss_dict)
+            else:
+                detr_weight_dict = detr_criterion.weight_dict
+                detr_loss = sum(
+                    detr_loss_dict[k] * detr_weight_dict[k] for k in detr_loss_dict.keys() if k in detr_weight_dict
+                )
             loss = detr_loss + (id_loss if id_loss is not None else 0) * id_criterion.weight
             # Logging losses:
             metrics.update(name="loss", value=loss.item())
@@ -444,6 +507,8 @@ def train_one_epoch(
             if id_loss is not None:
                 metrics.update(name="id_loss", value=id_loss.item())
             for k, v in detr_loss_dict.items():
+                if is_deim and any(t in k for t in ("_aux_", "_dn_", "_enc_", "_pre")):
+                    continue        # log only the final-layer terms
                 metrics.update(name=k, value=v.item())
             loss /= accumulate_steps
             accelerator.backward(loss)  # use this line to replace loss.backward()
@@ -467,6 +532,8 @@ def train_one_epoch(
                 metrics.update(name="other_grad_norm", value=other_grad_norm.item())
                 optimizer.step()
                 optimizer.zero_grad()
+                if ema is not None:
+                    ema.update(model)
 
         # Logging:
         tps.update(tps=tps.timestamp() - step_timestamp)
@@ -477,8 +544,9 @@ def train_one_epoch(
             # Get learning rate for current step:
             _lr = optimizer.state_dict()["param_groups"][-1]["lr"]
             # Get the GPU memory usage:
-            torch.cuda.synchronize()
-            _cuda_memory = torch.cuda.max_memory_allocated(device) / 1024 / 1024
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            _cuda_memory = torch.cuda.max_memory_allocated(device) / 1024 / 1024 if torch.cuda.is_available() else 0.0
             _cuda_memory = torch.tensor([_cuda_memory], device=device)
             # _cuda_memory_reduce = accelerator.reduce(_cuda_memory, reduction="none")
             _gathered_cuda_memory = accelerator.gather(_cuda_memory)
@@ -511,6 +579,7 @@ def train_one_epoch(
                     optimizer=None,
                     scheduler=None,
                     only_detr=only_detr,
+                    ema=ema,
                 )
                 logger.info(
                     log=f"Save the last checkpoint {current_last_checkpoint_idx} at step {step}."
@@ -574,6 +643,88 @@ def lr_warmup(optimizer, epoch: int, curr_iter: int, tgt_lr: float, warmup_epoch
             param_grop["lr"] = current_lr
         pass
     return
+
+
+def lr_warmup_by_iters(optimizer, curr_iter: int, tgt_lr: float, warmup_iters: int):
+    """Linear warmup by iterations (MOTIP2 App. A: 500 iterations in joint training)."""
+    current_lr = tgt_lr * (curr_iter + 1) / warmup_iters
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = current_lr * param_group.get("lr_scale", 1.0)
+
+
+def get_param_groups_motip2(model, config) -> list[dict]:
+    """MOTIP2 App. A: base LR; backbone x LR_BACKBONE_SCALE (0.5 N/S, 0.1 M, 0.05 L, 0.01 X); ID decoder x2
+    (LR_ID_DECODER_SCALE); weight decay disabled for norms, biases and embeddings (PLAN decision #3)."""
+    def _kind(n):
+        if "detr.backbone" in n:
+            return "backbone", config["LR_BACKBONE_SCALE"]
+        if n.startswith("id_decoder") or n.startswith("trajectory_modeling"):
+            return "id", config.get("LR_ID_DECODER_SCALE", 2.0)
+        return "other", 1.0
+
+    def _no_wd(n, p):
+        return p.ndim <= 1 or n.endswith(".bias") or "norm" in n or "embed" in n
+
+    groups = {}
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        kind, scale = _kind(n)
+        no_wd = _no_wd(n, p)
+        g = groups.setdefault((kind, no_wd), {
+            "params": [], "lr_scale": scale, "lr": config["LR"] * scale,
+            "weight_decay": 0.0 if no_wd else config["WEIGHT_DECAY"],
+        })
+        g["params"].append(p)
+    return list(groups.values())
+
+
+@torch.no_grad()
+def _forward_chunks(model, frames: NestedTensor, chunk: int):
+    outs = None
+    for (batch_frames,) in batch_iterator(chunk, frames):
+        out = model(frames=batch_frames, part="detr", lightweight=True)
+        outs = out if outs is None else {k: torch.cat([outs[k], out[k]], dim=0) for k in outs}
+    return outs
+
+
+def deim_detr_forward(model, detr_criterion, images, annotations, device, num_train_frames: int, num_no_grad_chunk: int):
+    """MOTIP2 detector step (Paper App. A): the detection loss is computed on `num_train_frames` random frames per
+    clip (4; 8 for N) while the ID decoder receives the full clip; the remaining frames run without grad and in
+    lightweight mode (no denoising/aux outputs). Returns outputs/indices of ALL frames in (b t) order.
+    """
+    _B, _T = len(annotations), len(annotations[0])
+    n_train = min(num_train_frames, _T)
+    perm = torch.randperm(_T).tolist()
+    train_t, ng_t = perm[:n_train], perm[n_train:]
+    flat = lambda ts: [b * _T + t for b in range(_B) for t in ts]
+    train_flat, ng_flat = flat(train_t), flat(ng_t)
+    targets_all = annotations_to_flatten_detr_targets(annotations=annotations, device=device)
+    x = einops.rearrange(images.tensors, "b t c h w -> (b t) c h w")
+    m = einops.rearrange(images.mask, "b t h w -> (b t) h w")
+
+    def _nested(idx):
+        i = torch.as_tensor(idx, device=x.device)
+        return NestedTensor(tensors=x.index_select(0, i).contiguous(), mask=m.index_select(0, i).contiguous())
+
+    keys = ("pred_logits", "pred_boxes", "outputs", "pos_embeds")
+    train_targets = [targets_all[i] for i in train_flat]
+    train_out, detr_loss_dict, train_indices = None, {}, []
+    if n_train > 0:
+        train_out = model(frames=_nested(train_flat), part="detr", targets=train_targets)
+        detr_loss_dict, train_indices = detr_criterion(train_out, train_targets)
+    ng_out, ng_indices = None, []
+    if len(ng_flat) > 0:
+        chunk = num_no_grad_chunk if num_no_grad_chunk > 0 else len(ng_flat)
+        ng_out = _forward_chunks(model, _nested(ng_flat), chunk)
+        ng_indices = detr_criterion.match(ng_out, [targets_all[i] for i in ng_flat])
+    order = torch.as_tensor(train_flat + ng_flat, device=x.device)
+    inv = torch.argsort(order)
+    parts = [o for o in (train_out, ng_out) if o is not None]
+    outputs = {k: torch.cat([o[k] for o in parts], dim=0).index_select(0, inv) for k in keys}
+    all_indices = train_indices + ng_indices
+    indices = [all_indices[i] for i in inv.tolist()]
+    return outputs, detr_loss_dict, indices
 
 
 def annotations_to_flatten_detr_targets(annotations: list, device):
