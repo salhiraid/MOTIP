@@ -32,6 +32,11 @@ class MOTIP(nn.Module):
         match kwargs["part"]:
             case "detr":
                 frames = kwargs["frames"]
+                if self.detr_framework == "deim":
+                    # DEIM takes optional targets (contrastive denoising) and a lightweight flag (no-grad frames).
+                    return self.detr(
+                        frames, targets=kwargs.get("targets", None), lightweight=kwargs.get("lightweight", False),
+                    )
                 if "use_checkpoint" in kwargs:
                     return checkpoint(
                         self.detr, frames,
@@ -41,6 +46,8 @@ class MOTIP(nn.Module):
                     return self.detr(samples=frames)
             case "trajectory_modeling":
                 seq_info = kwargs["seq_info"]
+                if self.trajectory_modeling is None:      # MOTIP2 flag TRAJECTORY_MODELING=False
+                    return seq_info
                 return self.trajectory_modeling(seq_info)
             case "id_decoder":
                 seq_info = kwargs["seq_info"]

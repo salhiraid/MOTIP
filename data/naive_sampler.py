@@ -19,6 +19,7 @@ class NaiveSampler(Sampler):
             sample_mode: str = "random_interval",
             seed: int = 1025,
             data_weights: dict | None = None,
+            samples_per_epoch: int | None = None,
     ):
         super().__init__()
         self.data_source = data_source
@@ -29,6 +30,7 @@ class NaiveSampler(Sampler):
         self.sample_mode = sample_mode
         self.seed = seed
         self.data_weights = data_weights
+        self.samples_per_epoch = samples_per_epoch      # MOTIP2 App. A: 40k samples per epoch
         # Check for these parameters:
         assert len(sample_steps) == len(sample_lengths) == len(sample_intervals), \
             "The lengths of sample_steps, sample_lengths, and sample_intervals should be the same."
@@ -123,6 +125,9 @@ class NaiveSampler(Sampler):
         g = torch.Generator()
         g.manual_seed(self.seed + epoch)
         indices = torch.randperm(kept_len, generator=g).tolist()
+        if self.samples_per_epoch is not None:
+            # MOTIP2: fixed epoch length; cycle through the (reshuffled-per-epoch) legal samples if too few.
+            indices = (indices * (self.samples_per_epoch // max(1, len(indices)) + 1))[:self.samples_per_epoch]
         self.sample_infos = [sample_infos[_] for _ in indices]
 
         # Recover the random state:

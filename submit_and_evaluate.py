@@ -10,7 +10,7 @@ from accelerate.state import PartialState
 from torch.utils.data import DataLoader
 
 from runtime_option import runtime_option
-from utils.misc import yaml_to_dict
+from utils.misc import yaml_to_dict, distributed_device
 from configs.util import load_super_config, update_config
 from log.logger import Logger
 from data.joint_dataset import dataset_classes
@@ -87,7 +87,8 @@ def submit_and_evaluate(config: dict):
         dataset=config["INFERENCE_DATASET"],
         data_split=config["INFERENCE_SPLIT"],
         outputs_dir=outputs_dir,
-        image_max_longer=config["INFERENCE_MAX_LONGER"],    # the max shorter side of the image is set to 800 by default
+        image_max_shorter=config.get("INFERENCE_MAX_SHORTER", 800),     # Paper §4.1: shorter side 800, longer <= 1440
+        image_max_longer=config["INFERENCE_MAX_LONGER"],
         size_divisibility=config.get("SIZE_DIVISIBILITY", 0),
         use_sigmoid=config.get("USE_FOCAL_LOSS", False),
         assignment_protocol=config.get("ASSIGNMENT_PROTOCOL", "hungarian"),
@@ -99,6 +100,10 @@ def submit_and_evaluate(config: dict):
         inference_only_detr=config["INFERENCE_ONLY_DETR"] if config["INFERENCE_ONLY_DETR"] is not None
         else config["ONLY_DETR"],
         dtype=config.get("INFERENCE_DTYPE", "FP32"),
+        n_init=config.get("N_INIT", 1),
+        rope_alpha=config.get("ROPE_ALPHA", 1.0),
+        rope_alpha_mode=config.get("ROPE_ALPHA_MODE", "multiply"),
+        image_normalize=config.get("IMAGE_NORMALIZE", True),
     )
 
     if metrics is not None:
@@ -136,6 +141,10 @@ def submit_and_evaluate_one_model(
         area_thresh: int = 0,
         inference_only_detr: bool = False,
         dtype: str = "FP32",
+        n_init: int = 1,
+        rope_alpha: float = 1.0,
+        rope_alpha_mode: str = "multiply",
+        image_normalize: bool = True,
 ):
     # Build the datasets:
     inference_dataset = dataset_classes[dataset](
@@ -183,6 +192,7 @@ def submit_and_evaluate_one_model(
             max_longer=image_max_longer,
             size_divisibility=size_divisibility,
             dtype=dtype,
+            normalize=image_normalize,
         )
         sequence_loader = DataLoader(
             dataset=sequence_dataset,
@@ -206,6 +216,9 @@ def submit_and_evaluate_one_model(
             area_thresh=area_thresh,
             only_detr=inference_only_detr,
             dtype=dtype,
+            n_init=n_init,
+            rope_alpha=rope_alpha,
+            rope_alpha_mode=rope_alpha_mode,
         )
         if is_fake:
             logger.info(
@@ -334,6 +347,10 @@ def submit_and_evaluate_one_model(
         metrics["AssRe"].update(eval_metrics_dict["AssRe"])
         metrics["MOTA"].update(eval_metrics_dict["MOTA"])
         metrics["IDF1"].update(eval_metrics_dict["IDF1"])
+        # MOTIP2 PLAN Phase 1: also log IDSW / FP / FN (needed for RESULTS.md and Tab. 9 comparisons).
+        for _k in ["IDSW", "CLR_FP", "CLR_FN"]:
+            if _k in eval_metrics_dict:
+                metrics[_k].update(eval_metrics_dict[_k])
         logger.success(
             log=f"Get evaluation metrics from {eval_metrics_path}.",
             only_main=True,
@@ -353,8 +370,8 @@ def get_results_of_one_sequence(
     for t, (image, image_path) in enumerate(sequence_loader):
         if t == 10:
             begin_time = time.time()
-        image.tensors = image.tensors.cuda()
-        image.mask = image.mask.cuda()
+        image.tensors = image.tensors.to(distributed_device())      # (was .cuda(); CPU-safe for smoke tests)
+        image.mask = image.mask.to(distributed_device())
         # image = nested_tensor_from_tensor_list(tensor_list=[image[0]])
         runtime_tracker.update(image=image)
         _results = runtime_tracker.get_track_results()

@@ -2,3 +2,13 @@
 
 # PyCharm
 .idea/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+# MOTIP2 runtime outputs
+outputs/
+pretrains/
+datasets/
+TrackEval/error_log.txt

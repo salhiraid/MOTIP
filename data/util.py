@@ -1,7 +1,9 @@
 # Copyright (c) Ruopeng Gao. All Rights Reserved.
 
+import random
 import torch
 import einops
+import torch.nn.functional as F
 
 from utils.nested_tensor import nested_tensor_from_tensor_list
 
@@ -95,6 +97,10 @@ def collate_fn(batch):
                     annotations[b][t]["unknown_id_labels"],
                     - torch.ones((_G, 1, max_N - _N), dtype=torch.int64)
                 ], dim=-1)
+                annotations[b][t]["unknown_real_id_labels"] = torch.cat([
+                    annotations[b][t]["unknown_real_id_labels"],
+                    - torch.ones((_G, 1, max_N - _N), dtype=torch.int64)
+                ], dim=-1)
                 annotations[b][t]["unknown_id_masks"] = torch.cat([
                     annotations[b][t]["unknown_id_masks"],
                     torch.ones((_G, 1, max_N - _N), dtype=torch.bool)
@@ -113,3 +119,39 @@ def collate_fn(batch):
         "annotations": annotations,
         "metas": metas,
     }
+
+
+def generate_scales(base_size: int, base_size_repeat: int, ratio_range=(0.75, 1.25), multiple: int = 32):
+    """DEIM `generate_scales` (engine/data/dataloader.py): sizes spanning ~75%..125% of the base, multiples of 32,
+    with the base size repeated `base_size_repeat` times (the 'bias toward base' of MOTIP2 App. A)."""
+    lo = int(base_size * ratio_range[0] / multiple) * multiple
+    hi = int(base_size * ratio_range[1] / multiple) * multiple
+    scale_repeat = (base_size - lo) // multiple
+    scales = [lo + i * multiple for i in range(scale_repeat)]
+    scales += [base_size] * base_size_repeat
+    scales += [hi - i * multiple for i in range(scale_repeat)]
+    return scales
+
+
+@torch.no_grad()
+def batch_multiscale(images, scale_factor: float, multiple: int = 32):
+    """Resize a (B, T, C, H, W) NestedTensor batch to ONE common size, shared by every frame of every clip.
+
+    MOTIP2 App. A: "each clip is resized to one of several resolutions ... all frames in a clip share the sampled
+    scale". DEIM has no padding-mask support, so per-clip valid regions are interpolated to a common size
+    (derived from the first clip, times `scale_factor`, rounded to a multiple of `multiple`); the returned mask is
+    all False (no padding). Boxes are normalised, so they need no change.
+    """
+    from utils.nested_tensor import NestedTensor
+    x, m = images.tensors, images.mask            # (B,T,C,H,W), (B,T,H,W) (True = padding)
+    B, T = x.shape[:2]
+    valid_h = (~m[:, 0]).any(dim=-1).sum(-1)        # (B,)
+    valid_w = (~m[:, 0]).any(dim=-2).sum(-1)
+    th = max(multiple, int(round(valid_h[0].item() * scale_factor / multiple)) * multiple)
+    tw = max(multiple, int(round(valid_w[0].item() * scale_factor / multiple)) * multiple)
+    out = x.new_zeros((B, T, x.shape[2], th, tw))
+    for b in range(B):
+        h, w = int(valid_h[b]), int(valid_w[b])
+        frames = x[b, :, :, :h, :w].float()
+        out[b] = F.interpolate(frames, size=(th, tw), mode="bilinear", align_corners=False).to(x.dtype)
+    return NestedTensor(tensors=out, mask=torch.zeros((B, T, th, tw), dtype=torch.bool, device=x.device))

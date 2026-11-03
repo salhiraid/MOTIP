@@ -12,6 +12,7 @@ from .dancetrack import DanceTrack
 from .sportsmot import SportsMOT
 from .crowdhuman import CrowdHuman
 from .bft import BFT
+from .personpath22 import PersonPath22, PersonPath22_Inference
 
 
 dataset_classes = {
@@ -19,6 +20,8 @@ dataset_classes = {
     "SportsMOT": SportsMOT,
     "CrowdHuman": CrowdHuman,
     "BFT": BFT,
+    "PersonPath22": PersonPath22,                        # MOTIP2 (PLAN Phase 8)
+    "PersonPath22_Inference": PersonPath22_Inference,
 }
 
 
@@ -43,6 +46,8 @@ class JointDataset(Dataset):
 
         # Handle the parameters **kwargs:
         self.size_divisibility = kwargs.get("size_divisibility", 0)
+        # `fake_images`: replace image decoding by blank images of the right size (augmentation statistics only).
+        self.fake_images = kwargs.get("fake_images", False)
 
         # Load the datasets into "sequence_infos", "image_paths", and "annotations",
         # each of which is a dictionary with the dataset name and split as the key.
@@ -137,9 +142,14 @@ class JointDataset(Dataset):
         # images = [
         #     read_image(image_path) for image_path in image_paths
         # ]   # a list of tensors, shape=(C, H, W), dtype=torch.uint8
-        images = [
-            Image.open(image_path) for image_path in image_paths
-        ]  # a list of tensors, shape=(C, H, W), dtype=torch.uint8
+        if self.fake_images:
+            _info = self.sequence_infos[dataset][split][sequence]
+            images = [Image.new("RGB", (_info["width"], _info["height"])) for _ in image_paths] \
+                if "width" in _info else [Image.open(image_path) for image_path in image_paths]
+        else:
+            images = [
+                Image.open(image_path) for image_path in image_paths
+            ]  # a list of tensors, shape=(C, H, W), dtype=torch.uint8
         # images = torch.stack(images, dim=0)     # shape=(N, C, H, W), dtype=torch.uint8
         # Get annotations:
         annotations = [
