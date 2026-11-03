@@ -280,6 +280,7 @@ def train_engine(config: dict):
                     inference_only_detr=config["INFERENCE_ONLY_DETR"] if config["INFERENCE_ONLY_DETR"] is not None
                     else config["ONLY_DETR"],
                     n_init=config.get("N_INIT", 1),
+                    n_init_ttl=config.get("N_INIT_TTL", 0),
                     rope_alpha=config.get("ROPE_ALPHA", 1.0),
                     rope_alpha_mode=config.get("ROPE_ALPHA_MODE", "multiply"),
                     image_normalize=config.get("IMAGE_NORMALIZE", True),
@@ -393,6 +394,14 @@ def train_one_epoch(
 
         _B, _T = len(annotations), len(annotations[0])
         detr_num_train_frames = min(detr_num_train_frames, _T)
+        # MOTIP2 Tab. 8 statistics of the ID-switch augmentation, measured live on the batches actually trained on
+        _sw = [a[0]["switch_stats"] for a in annotations if "switch_stats" in a[0]]
+        if _sw:
+            _n_obj, _n_sw = sum(x["n_obj"] for x in _sw), sum(x["n_swapped"] for x in _sw)
+            metrics.update(name="idsw_swap_pct", value=100.0 * _n_sw / max(1, _n_obj))
+            if _n_sw > 0:
+                metrics.update(name="idsw_longrange_pct", value=100.0 * sum(x["n_long_range"] for x in _sw) / _n_sw)
+                metrics.update(name="idsw_mean_giou", value=sum(x["giou_sum"] for x in _sw) / _n_sw)
 
         if is_deim:
             detr_outputs, detr_loss_dict, detr_indices = deim_detr_forward(
@@ -606,6 +615,9 @@ def train_one_epoch(
                 current_last_checkpoint_idx += 1
         # Update the counters:
         states["global_step"] += 1
+    # sync everything once more: metrics that first appear after the last logging step (e.g. ID-switch statistics when
+    # the first batches have no swap) would otherwise be un-synced, and epoch averages would miss the last steps.
+    metrics.sync()
     states["start_epoch"] += 1
     return metrics
 

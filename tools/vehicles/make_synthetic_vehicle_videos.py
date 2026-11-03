@@ -51,9 +51,13 @@ def make_video(vid, out_dir, rng, n_frames, w, h, n_obj, keyframes_only):
         bw, bh = rng.integers(int(0.15 * w), int(0.3 * w)), rng.integers(int(0.12 * h), int(0.25 * h))
         a = int(rng.integers(0, n_frames // 4))
         b = int(rng.integers(3 * n_frames // 4, n_frames))
-        x0, y0 = rng.uniform(0, w - bw), rng.uniform(0, h - bh)
-        vx, vy = rng.uniform(-2.5, 2.5), rng.uniform(-1.0, 1.0)
-        col = tuple(int(c) for c in rng.integers(70, 255, 3))
+        L = b - a                                           # exactly LINEAR motion that never touches the border, so that
+        vx, vy = rng.uniform(-1.5, 1.5), rng.uniform(-0.6, 0.6)   # CVAT-style interpolation between keyframes is exact
+        vx = float(np.clip(vx, -(w - bw) / max(1, L) * 0.9, (w - bw) / max(1, L) * 0.9))
+        vy = float(np.clip(vy, -(h - bh) / max(1, L) * 0.9, (h - bh) / max(1, L) * 0.9))
+        x0 = rng.uniform(max(0.0, -vx * L), min(w - bw, w - bw - vx * L))
+        y0 = rng.uniform(max(0.0, -vy * L), min(h - bh, h - bh - vy * L))
+        col = tuple(int(c) for c in rng.integers(120, 235, 3))
         objs.append((label, bw, bh, a, b, x0, y0, vx, vy, col))
     ignore_box = (0, int(0.85 * h), int(0.4 * w), h)
     boxes_per_obj = [[] for _ in objs]
@@ -64,7 +68,7 @@ def make_video(vid, out_dir, rng, n_frames, w, h, n_obj, keyframes_only):
             if a <= f <= b:
                 x = float(np.clip(x0 + vx * (f - a), 0, w - bw)); y = float(np.clip(y0 + vy * (f - a), 0, h - bh))
                 img[int(y):int(y + bh), int(x):int(x + bw)] = col
-                img[int(y):int(y + bh) // 3 + int(y), int(x):int(x + bw)] = tuple(255 - c for c in col)
+                img[int(y):int(y) + int(bh) // 3, int(x):int(x + bw)] = tuple(min(255, c + 20) for c in col)   # top third, inside the box
                 key = int((f - a) % 6 == 0 or f == b)
                 boxes_per_obj[i].append((f, x, y, x + bw, y + bh, 0, key))
         Image.fromarray(img).save(os.path.join(tmp, f"{f:05d}.png"))

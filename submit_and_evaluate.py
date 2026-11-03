@@ -101,6 +101,7 @@ def submit_and_evaluate(config: dict):
         else config["ONLY_DETR"],
         dtype=config.get("INFERENCE_DTYPE", "FP32"),
         n_init=config.get("N_INIT", 1),
+        n_init_ttl=config.get("N_INIT_TTL", 0),
         rope_alpha=config.get("ROPE_ALPHA", 1.0),
         rope_alpha_mode=config.get("ROPE_ALPHA_MODE", "multiply"),
         image_normalize=config.get("IMAGE_NORMALIZE", True),
@@ -145,6 +146,7 @@ def submit_and_evaluate_one_model(
         rope_alpha: float = 1.0,
         rope_alpha_mode: str = "multiply",
         image_normalize: bool = True,
+        n_init_ttl: int = 0,
 ):
     # Build the datasets:
     inference_dataset = dataset_classes[dataset](
@@ -217,6 +219,7 @@ def submit_and_evaluate_one_model(
             only_detr=inference_only_detr,
             dtype=dtype,
             n_init=n_init,
+            n_init_ttl=n_init_ttl,
             rope_alpha=rope_alpha,
             rope_alpha_mode=rope_alpha_mode,
         )

@@ -12,7 +12,7 @@ from PIL import Image
 
 from utils.box_ops import box_xywh_to_xyxy, box_xyxy_to_cxcywh
 from .util import is_legal
-from .id_switch import apply_id_switch
+from .id_switch import apply_id_switch, SwitchStats
 
 
 def _tv_params(transform, flat_inputs):
@@ -618,6 +618,7 @@ class TurnIntoTrajectoryAndUnknown:
         if self.id_switch != "none":
             # Make trajectory switch (MOTIP2 Sec. 3.2: `spatial` = GIoU-biased permutation, `uniform` = MOTIP's).
             # Switching the ID labels is the same as switching the ann_idxs and masks of the slots.
+            _local_stats = SwitchStats()           # per-sample counts, aggregated in the training loop (Tab. 8 live)
             trajectory_ann_idxs, trajectory_id_masks = apply_id_switch(
                 ann_idxs=trajectory_ann_idxs,
                 id_masks=trajectory_id_masks,
@@ -627,8 +628,17 @@ class TurnIntoTrajectoryAndUnknown:
                 reference=self.id_switch_reference,
                 subset_prob=self.id_switch_subset_prob,
                 absent=self.id_switch_absent,
-                stats=self.stats,
+                stats=_local_stats,
             )
+            annotations[0]["switch_stats"] = {
+                "n_obj": _local_stats.n_obj, "n_swapped": _local_stats.n_swapped,
+                "n_long_range": _local_stats.n_long_range, "giou_sum": _local_stats.giou_sum,
+            }
+            if self.stats is not None:
+                self.stats.n_obj += _local_stats.n_obj
+                self.stats.n_swapped += _local_stats.n_swapped
+                self.stats.n_long_range += _local_stats.n_long_range
+                self.stats.giou_sum += _local_stats.giou_sum
 
         # Check all ID labels are legal:
         assert torch.all(trajectory_id_labels >= 0)

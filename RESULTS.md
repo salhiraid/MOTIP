@@ -53,3 +53,25 @@ Paper reference numbers live in `PLAN.md` §7. Latency: report the ratio S/MOTIP
 | D16 | 2026-11-03 | Vehicle workflow added (docs/VEHICLES.md): CVAT video XML preprocessing with site-disjoint split, 5-class DEIM head, mmdet-checkpoint converter. Verified only on synthetic videos (125 tests + CPU end-to-end smoke); real data / checkpoint / GPU not yet exercised. Class mapping (van, car_with_trailer -> car; all trucks -> truck) is an assumption to confirm. | Open (needs your data) |
 | D8 | 2026-11-03 | Gate 1's ±0.5 HOTA is tighter than MOTIP's documented ~1.5 retrain instability (`docs/GET_STARTED.md:61`); applied to the released checkpoint only. | Noted |
 | P1 | 2026-11-03 | Paper inconsistency: §4.2 text says disabling priors moves DetA "by at most 0.2" but Tab. 1 shows MOTIP2-X DetA 84.3 → 83.0 (w/o priors). Not a blocker; use the table values. | Noted |
+
+## 5. Verification campaign (synthetic data, CPU) — what was measured
+
+Everything here ran on this CPU-only machine with synthetic data: it demonstrates that **mechanisms work and code paths are consistent**,
+not benchmark accuracy. Method details and the full requirement→test map: `AUDIT.md`.
+
+| Experiment | Result |
+|---|---|
+| Spatial Anchor, objects with IDENTICAL appearance (toy, trained ID decoder) | **98.1 %** with anchor vs **24.2 %** without (chance 25 %); distinct appearance without anchor 99.8 % |
+| Temporal encoding, older history carries consistently wrong labels (toy) | RoPE **95–98 %** (5/5 inits, 400 steps); no-rotation control **25 %** (chance); legacy learned bias 99 % but only 2/5 inits in 600 steps (4/5 in 1200) |
+| Additive fusion at half width vs concatenation (toy) | both > 97 %, additive ≥ concat − 3 pts |
+| Spatial ID Loss (toy, noisy positions, 2 seeds) | expected localisation cost −10 %, wrong predictions land on nearer objects; at heavy noise accuracy drops 89→74 % (newborn class has zero spatial cost) |
+| Spatial ID Switches benefit (toy) | **not demonstrable**: none ≈ uniform ≈ spatial in two toy designs (clean-trained decoder already pools all context frames). Verified exactly instead (permutations, σ→∞ ≡ uniform, uniform ≡ original code, live Tab. 8 statistics) |
+| Detector, DEIM-N from random init, 300 steps on 4 images, real criterion | best-match IoU **0.215 → 0.978**, matched-query score **0.017 → 0.957** |
+| Tracking stack with a TRAINED decoder + oracle detections, real `RuntimeTracker`, TrackEval | **HOTA 100 / IDF1 100 / IDSW 0** (n_init=1); **HOTA 97.5** (n_init=2, first frame of each track withheld); **HOTA 96.3, IDSW 0** with two objects undetected for 3 frames; control with UNTRAINED decoder: **HOTA 71.6, AssA 51.3, IDSW 49** |
+| ONNX export (S/N size, trained checkpoint) | detector: 100 % of boxes matched, max diff 3e-6; ID decoder: 2e-6 at shapes (1×3×2)…(20×30×12) incl. 1-frame context; exported graphs inside the real tracker give the same boxes/identities as PyTorch |
+| 2-process CPU DDP (gloo), stage 1 and stage 2 with all priors, EMA, sharded eval, resume | passes (found/fixed a CUDA-only reduction in the logger) |
+| End-to-end learning from RANDOM weights on synthetic videos (500 detector + 160 joint iterations) | **inconclusive, and reported as such**: box loss fell 3.6→0.5 but scores never reached the 0.3 threshold (0 detections), ID cross-entropy 2.5 vs chance 3.9. Too little compute for a from-scratch detector; pretrained weights could not be downloaded here |
+
+### Defects found by this campaign (all fixed + regression tests)
+D15 detector-only eval emitted nothing with `N_INIT=2` · D17 logger hard-coded `cuda` / NCCL-only reduce, metrics first seen after step 0 never synced ·
+D18 synthetic-data bugs found by strict tests (colour contrast, stripe precedence, nonlinear motion) — converter itself was correct (GT equals generator truth to 0.01 px).

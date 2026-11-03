@@ -116,6 +116,7 @@ def runtime_option():
     parser.add_argument("--spatial-anchor", type=str)
     parser.add_argument("--pos-enc", type=str, help="learned_rel | rope")
     parser.add_argument("--n-init", type=int)
+    parser.add_argument("--n-init-ttl", type=int, help="missed frames an UNCONFIRMED track survives (0 = discard at first miss)")
     parser.add_argument("--detector", type=str, help="deformable_detr | deim")
     parser.add_argument("--id-fusion", type=str, help="add | concat")
     parser.add_argument("--model-size", type=str, help="N | S | M | L | X")

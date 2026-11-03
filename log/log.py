@@ -3,7 +3,7 @@
 import torch.distributed
 import time
 
-from utils.misc import is_distributed, distributed_world_size
+from utils.misc import is_distributed, distributed_world_size, distributed_device
 from collections import deque, defaultdict
 
 
@@ -18,8 +18,18 @@ class Metrics:
         return
 
     def sync(self):
-        for name, value in self.metrics.items():
-            value.sync()
+        names = list(self.metrics.keys())
+        if is_distributed():
+            # Every rank must issue the SAME collective calls in the SAME order. A metric that is only logged on some steps
+            # (e.g. ID-switch statistics when a swap happened) can exist on one rank and not on another -> deadlock.
+            # So: exchange the key sets, create the missing (empty) metrics, and sync in a canonical order.
+            gathered = [None] * distributed_world_size()
+            torch.distributed.all_gather_object(gathered, sorted(names))
+            for k in set().union(*map(set, gathered)):
+                self.metrics[k]                 # defaultdict creates an empty Value
+            names = sorted(self.metrics.keys())
+        for name in names:
+            self.metrics[name].sync()
         return
 
     def __getitem__(self, item):
@@ -59,10 +69,10 @@ class TPS:
         if not is_distributed():
             return _average
         else:
-            _average = torch.tensor(_average, dtype=torch.float32, device="cuda")
-            torch.distributed.all_reduce(_average, op=torch.distributed.ReduceOp.AVG)
-            # print(_average)
-            return _average.item()
+            # (device-agnostic: was device="cuda" + ReduceOp.AVG, which only works with NCCL)
+            _average = torch.tensor(_average, dtype=torch.float32, device=distributed_device())
+            torch.distributed.all_reduce(_average, op=torch.distributed.ReduceOp.SUM)
+            return (_average / distributed_world_size()).item()
 
     def eta(self, total_steps: int, current_steps: int):
         return self.average * (total_steps - current_steps)
@@ -134,7 +144,7 @@ class Value:
     @property
     def global_average(self):
         self._check_sync()
-        return self.total_value_sync / self.total_count_sync
+        return self.total_value_sync / self.total_count_sync if self.total_count_sync else float("nan")
 
     @property
     def median(self):
