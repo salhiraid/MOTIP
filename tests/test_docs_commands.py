@@ -11,7 +11,7 @@ import pytest
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 
-DOCS = ["README_MOTIP2.md", "docs/MOTIP2.md", "docs/VEHICLES.md"]
+DOCS = ["README_MOTIP2.md", "docs/MOTIP2.md", "docs/VEHICLES.md", "docs/DATASETS.md"]
 
 
 def extract_commands(md_path):
@@ -63,7 +63,8 @@ def check_train_or_eval(argv):
 
 
 def check_tool(script, argv):
-    help_out = subprocess.run([sys.executable, os.path.join(ROOT, script), "--help"], capture_output=True, text=True, cwd=ROOT)
+    sub = [argv[0]] if script.endswith("prepare_dataset.py") and argv and not argv[0].startswith("-") else []   # subcommand flags
+    help_out = subprocess.run([sys.executable, os.path.join(ROOT, script), *sub, "--help"], capture_output=True, text=True, cwd=ROOT)
     assert help_out.returncode == 0, f"{script} --help failed: {help_out.stderr[-300:]}"
     for a in argv:
         if a.startswith("--"):

@@ -236,7 +236,7 @@ def submit_and_evaluate_one_model(
             logger=logger,
         )
         # Write the results to the submit file:
-        if dataset in ["DanceTrack", "SportsMOT", "MOT17", "PersonPath22_Inference", "BFT", "Vehicles"]:
+        if True:      # every MOT-style dataset (unified/custom ones included; unknown names failed at loading)
             sequence_tracker_results = []
             for t in range(len(sequence_results)):
                 for obj_id, score, category, bbox in zip(
@@ -278,7 +278,7 @@ def submit_and_evaluate_one_model(
                 only_main=True,
             )
             # Prepare for evaluation:
-            if dataset in ["DanceTrack", "SportsMOT", "MOT17", "BFT", "Vehicles"]:
+            if dataset not in ["PersonPath22_Inference"]:
                 gt_dir = os.path.join(data_root, dataset, data_split)
                 tracker_dir = os.path.join(outputs_dir, "tracker")
             elif dataset in ["PersonPath22_Inference"]:
@@ -286,7 +286,7 @@ def submit_and_evaluate_one_model(
                 tracker_dir = os.path.join(outputs_dir, "tracker")
             else:
                 raise NotImplementedError(f"Do not support to find the gt_dir for dataset '{dataset}'.")
-            if dataset in ["DanceTrack", "SportsMOT", "BFT", "Vehicles"] or (dataset in ["MOT17"] and data_split == "test"):
+            if dataset not in ["PersonPath22_Inference", "MOT17"] or (dataset in ["MOT17"] and data_split == "test"):
                 args = {
                     "--SPLIT_TO_EVAL": data_split,
                     "--METRICS": ["HOTA", "CLEAR", "Identity"],

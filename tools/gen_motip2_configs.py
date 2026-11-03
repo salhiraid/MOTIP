@@ -41,6 +41,9 @@ BASE = {
     "USE_AUX_LOSS": False, "USE_SHARED_AUX_HEAD": True, "USE_FOCAL_LOSS": False,
     # --- data / augmentation (App. A) ---
     "SAMPLE_STEPS": [0], "SAMPLE_INTERVALS": [4], "LENGTH_PER_ITERATION": None, "SAMPLES_PER_EPOCH": 40000,
+    "DATASET_MIX": None,               # multi-dataset: fraction of each epoch drawn from each dataset (tools/gen_mix_config.py)
+    "DATASET_MAX_INTERVALS": None,     # multi-dataset: per-dataset cap of the random frame interval (low-fps data: 1)
+    "CLASS_MASKING": False,            # multi-dataset: no classification loss for classes a dataset does not annotate
     "AUG_PIPELINE": "motip2", "AUG_BASE_SIZE": 800, "AUG_MAX_SIZE": 1440, "AUG_MULTISCALE": True,
     "AUG_MAX_SHIFT_RATIO": 0.06, "AUG_OVERFLOW_BBOX": False,
     "AUG_NUM_GROUPS": 6, "AUG_TRAJECTORY_OCCLUSION_PROB": 0.5, "AUG_TRAJECTORY_SWITCH_PROB": 0.5,
@@ -96,7 +99,7 @@ BENCHES = {
 
 def compose(size: str, bench: str, stage: int) -> dict:
     lr, bb, wd, hidden, layers, repeat, imgs, clips, det_frames = SIZES[size]
-    b = BENCHES[bench]
+    b = BENCHES[bench] if isinstance(bench, str) else bench      # a bench name or a bench dict (tools/gen_mix_config.py)
     cfg = dict(BASE)
     cfg.update({
         "MODEL_SIZE": size, "DETR_HIDDEN_DIM": hidden, "FEATURE_DIM": hidden, "ID_DIM": hidden,

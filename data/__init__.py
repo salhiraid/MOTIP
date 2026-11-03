@@ -14,6 +14,8 @@ def build_dataset(config: dict):
         splits=config["DATASET_SPLITS"],
         transforms=build_transforms(config),
         size_divisibility=config.get("SIZE_DIVISIBILITY", 0),
+        class_masking=bool(config.get("CLASS_MASKING", False)),
+        num_classes=config.get("NUM_CLASSES", 1),
     )
 
 

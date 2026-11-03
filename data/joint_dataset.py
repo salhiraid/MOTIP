@@ -14,9 +14,10 @@ from .crowdhuman import CrowdHuman
 from .bft import BFT
 from .personpath22 import PersonPath22, PersonPath22_Inference
 from .vehicles import Vehicles
+from .unified_mot import UNIFIED_DATASETS, DatasetRegistry, make_unified_class
 
 
-dataset_classes = {
+_legacy_classes = {
     "DanceTrack": DanceTrack,
     "SportsMOT": SportsMOT,
     "CrowdHuman": CrowdHuman,
@@ -25,6 +26,12 @@ dataset_classes = {
     "PersonPath22_Inference": PersonPath22_Inference,
     "Vehicles": Vehicles,                                # vehicle tracking (tools/vehicles/)
 }
+# Every dataset converted by data/converters/* uses the unified loader (data/unified_mot.py); names that are not
+# registered at all also fall back to it, reading <DATA_ROOT>/<name> (custom datasets).
+dataset_classes = DatasetRegistry(_legacy_classes)
+for _name, _dir in UNIFIED_DATASETS.items():
+    if _name not in dataset_classes:
+        dataset_classes[_name] = make_unified_class(_name, _dir)
 
 
 class JointDataset(Dataset):
@@ -50,6 +57,10 @@ class JointDataset(Dataset):
         self.size_divisibility = kwargs.get("size_divisibility", 0)
         # `fake_images`: replace image decoding by blank images of the right size (augmentation statistics only).
         self.fake_images = kwargs.get("fake_images", False)
+        # `class_masking`: attach to every annotation the mask of classes its dataset annotates (see the DEIM criterion).
+        self.class_masking = kwargs.get("class_masking", False)
+        self.num_classes = kwargs.get("num_classes", 1)
+        self.class_masks = defaultdict(dict)        # [dataset][split] -> float tensor [num_classes] | None
 
         # Load the datasets into "sequence_infos", "image_paths", and "annotations",
         # each of which is a dictionary with the dataset name and split as the key.
@@ -67,6 +78,7 @@ class JointDataset(Dataset):
                 self.sequence_infos[dataset][split] = dataset_class.get_sequence_infos()
                 self.image_paths[dataset][split] = dataset_class.get_image_paths()
                 self.annotations[dataset][split] = dataset_class.get_annotations()
+                self.class_masks[dataset][split] = self._make_class_mask(dataset_class)
             except KeyError:
                 raise AttributeError(f"Dataset {dataset} is not supported.")
         # Decouple the 'is_legal' attribute from the annotations,
@@ -78,6 +90,16 @@ class JointDataset(Dataset):
         # you should call "self.set_sample_details()" to prepare them.
         self.sample_begins: list | None = None      # a tuple: (dataset, split, sequence_name, begin_index)
         return
+
+    def _make_class_mask(self, dataset_obj):
+        if not self.class_masking or not hasattr(dataset_obj, "annotated_classes"):
+            return None
+        idx = dataset_obj.annotated_classes()
+        if idx is None or len(idx) >= self.num_classes and set(range(self.num_classes)) <= set(idx):
+            return None
+        mask = torch.zeros(self.num_classes)
+        mask[[i for i in idx if i < self.num_classes]] = 1.0
+        return mask
 
     def _decouple_is_legal(self):
         decoupled_is_legal = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
@@ -178,6 +200,10 @@ class JointDataset(Dataset):
         # Apply transforms:
         if self.transforms is not None:
             images, annotations, metas = self.transforms(images, annotations, metas)
+        mask = self.class_masks[dataset][split]
+        if mask is not None:
+            for annotation in annotations:
+                annotation["class_mask"] = mask.clone()
         # from .tools import visualize_a_batch
         # visualize_a_batch(images, annotations)
         return images, annotations, metas

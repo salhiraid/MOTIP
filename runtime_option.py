@@ -25,6 +25,14 @@ def runtime_option():
     # About data.
     parser.add_argument("--data-root", type=str, help="Data root path.")
     parser.add_argument("--dataset-weights", nargs="*", type=int)
+    # Multi-dataset training (docs/DATASETS.md):
+    parser.add_argument("--datasets", nargs="*", type=str, help="Training datasets, e.g. Vehicles BDD100K_MOT UA_DETRAC.")
+    parser.add_argument("--dataset-splits", nargs="*", type=str, help="One split per dataset, e.g. train train train.")
+    parser.add_argument("--dataset-mix", nargs="*", type=float,
+                        help="Fraction of every epoch drawn from each dataset (normalised); needs --samples-per-epoch.")
+    parser.add_argument("--class-masking", type=str, help="True/False: no classification loss for classes a dataset does not annotate.")
+    parser.add_argument("--dataset-max-intervals", nargs="*", type=int,
+                        help="Per-dataset cap of the random frame interval (low-fps datasets: 1).")
 
     # About evaluation.
     parser.add_argument("--eval-model", type=str, help="Eval model path.")

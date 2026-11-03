@@ -98,10 +98,35 @@ A complete workflow for a CSV-indexed collection of annotated videos (CVAT video
 Quick start: prepare data (`--dry-run` first) → `visualize_gt.py` → convert detector → detection-only check → short stage 1 → stage 2 →
 evaluate on `val`; every command is in the guide. Not run on your real data/GPU; see its status box.
 
+## 2c. Training on one or several public tracking datasets (added later)
+
+BDD100K MOT, UA-DETRAC, VisDrone-MOT, UAVDT, KITTI tracking, CityFlow, the FastTracker benchmark (any MOT-format data), Waymo (v2 2D
+camera boxes), nuScenes / Argoverse 2 (3D boxes projected to 2D) and generic 3D-box data (e.g. I-24 3D) are converted to **one unified
+layout and one class space** (default: your 5 classes), then mixed in a single run. Guide, per-dataset input layouts, label mappings,
+licence warnings and the verification status: **[docs/DATASETS.md](./docs/DATASETS.md)**.
+
+| Piece | File |
+|---|---|
+| Unified loader (any folder in the layout is loadable by name) + dataset facts | `data/unified_mot.py` |
+| Class sets, label → class resolution, frame-interval rule | `data/class_maps.py` |
+| One converter per dataset + shared writer (`--dry-run`, image link/copy/jpeg+resize, statistics, K recommendation) | `data/converters/*`, CLI `tools/prepare_dataset.py` |
+| 3D → 2D cuboid projection (near-plane clipping) | `data/converters/project3d.py` |
+| Exact per-dataset shares of every epoch (`DATASET_MIX`), per-dataset frame-interval cap (`DATASET_MAX_INTERVALS`) | `data/naive_sampler.py`, `train.py` |
+| No classification loss for classes a dataset does not annotate (`CLASS_MASKING`) | `models/deim/deim_criterion.py`, `data/joint_dataset.py` |
+| Config generator for any mixture (stage 1 + 2, warnings, commands) | `tools/gen_mix_config.py` |
+| Same checkpoint on several datasets → one table | `tools/eval_datasets.py` |
+
+```bash
+python tools/prepare_dataset.py detrac --root /data/ua-detrac --out ./datasets --dry-run
+python tools/gen_mix_config.py --name mix_a --size S --datasets Vehicles UA_DETRAC --mix 0.7 0.3
+```
+Status: tested on synthetic files in each dataset's native format and on a CPU training run; **not** run on the real downloads (no access
+here), and no accuracy claim is made for any mixture.
+
 ## 3. Installation
 
 ```bash
-pip install torch torchvision einops scipy pyyaml pillow accelerate wandb pytest     # DEIM needs no CUDA extension
+pip install torch torchvision einops scipy pyyaml pillow accelerate wandb pytest pandas pyarrow     # DEIM needs no CUDA extension
 # only for the ORIGINAL MOTIP baseline (Deformable DETR): compile its CUDA op
 (cd models/ops && sh make.sh)
 ```

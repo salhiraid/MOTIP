@@ -8,7 +8,7 @@ implemented and **which test proves it**. "Proves" is graded honestly:
 * **WIRING** — the flag/number reaches the module (a config or plumbing check). Necessary, not sufficient.
 * **NOT VERIFIED** — needs real data, a GPU or TensorRT; nothing here claims it works.
 
-Run everything: `python -m pytest tests -q` (169 tests, ~10 min on 4 CPU cores). `-m "not slow"` skips the detector-overfit and end-to-end/DDP tests (~5 min saved).
+Run everything: `python -m pytest tests -q` (see the count at the end of the run, ~12 min on 4 CPU cores). `-m "not slow"` skips the detector-overfit and end-to-end/DDP tests (~5 min saved).
 
 ## A. Requirements → code → proof
 
@@ -44,6 +44,9 @@ Run everything: `python -m pytest tests -q` (169 tests, ~10 min on 4 CPU cores).
 | 28 | Resume with EMA state | `train.py`, `models/misc.py` | epoch/step/EMA-update counters verified across a resume |
 | 29 | Evaluation pipeline reproduces MOTIP (Gate 1, 64.0 HOTA) | `submit_and_evaluate.py` | **NOT VERIFIED** (needs GPU, data, checkpoint) |
 | 30 | Paper numbers (Tab. 1–10) | — | **NOT VERIFIED**: no run on real benchmarks exists |
+| 31 | Train on one or several tracking datasets (BDD100K, UA-DETRAC, VisDrone, UAVDT, FastTracker, CityFlow, KITTI, Waymo, nuScenes, AV2, 3D-box data) | `data/converters/*`, `data/unified_mot.py`, `data/class_maps.py` | EXACT each converter on a tiny dataset in the dataset's *native format* (boxes, classes, ids, splits, distractors/ignore, jpeg-resize rescaling); EXACT 3D projections vs an independent corner projection (translated/yawed ego, AV2 ego-motion); mutation-checked (dropping ego-motion, ego translation, near-plane clipping makes tests fail). **Real downloads NOT tested** (docs/DATASETS.md §8) |
+| 32 | Exact dataset shares per epoch, per-dataset frame-interval cap | `data/naive_sampler.py` | EXACT shares (largest remainder), determinism, cycling, caps; default sampling bit-identical without the options |
+| 33 | No classification loss for classes a dataset does not annotate | `models/deim/deim_criterion.py`, `data/joint_dataset.py` | EXACT zero gradient on masked columns / unchanged elsewhere; mask survives the real augmentation + collate; CPU end-to-end run on two converted datasets. **Benefit NOT measured** |
 
 ## B. Defects found by auditing/testing (all fixed, each with a regression test)
 
