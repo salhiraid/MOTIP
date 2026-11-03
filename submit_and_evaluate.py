@@ -100,6 +100,9 @@ def submit_and_evaluate(config: dict):
         inference_only_detr=config["INFERENCE_ONLY_DETR"] if config["INFERENCE_ONLY_DETR"] is not None
         else config["ONLY_DETR"],
         dtype=config.get("INFERENCE_DTYPE", "FP32"),
+        n_init=config.get("N_INIT", 1),
+        rope_alpha=config.get("ROPE_ALPHA", 1.0),
+        rope_alpha_mode=config.get("ROPE_ALPHA_MODE", "multiply"),
     )
 
     if metrics is not None:
@@ -137,6 +140,9 @@ def submit_and_evaluate_one_model(
         area_thresh: int = 0,
         inference_only_detr: bool = False,
         dtype: str = "FP32",
+        n_init: int = 1,
+        rope_alpha: float = 1.0,
+        rope_alpha_mode: str = "multiply",
 ):
     # Build the datasets:
     inference_dataset = dataset_classes[dataset](
@@ -207,6 +213,9 @@ def submit_and_evaluate_one_model(
             area_thresh=area_thresh,
             only_detr=inference_only_detr,
             dtype=dtype,
+            n_init=n_init,
+            rope_alpha=rope_alpha,
+            rope_alpha_mode=rope_alpha_mode,
         )
         if is_fake:
             logger.info(

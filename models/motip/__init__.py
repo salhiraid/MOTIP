@@ -61,23 +61,26 @@ def build(config: dict):
             raise NotImplementedError(f"DETR framework {detr_framework} is not supported.")
 
     # Build each component:
-    # 1. trajectory modeling (currently, only FFNs are used):
+    # 1. trajectory modeling (currently, only FFNs are used; PLAN N4: kept in MOTIP2, flag TRAJECTORY_MODELING):
     _trajectory_modeling = TrajectoryModeling(
         detr_dim=config["DETR_HIDDEN_DIM"],
         ffn_dim_ratio=config["FFN_DIM_RATIO"],
         feature_dim=config["FEATURE_DIM"],
-    ) if config["ONLY_DETR"] is False else None
-    # 2. ID decoder:
+    ) if (config["ONLY_DETR"] is False and config.get("TRAJECTORY_MODELING", True)) else None
+    # 2. ID decoder (MOTIP2 flags ID_FUSION / POS_ENC / SPATIAL_ANCHOR; defaults reproduce MOTIP):
     _id_decoder = IDDecoder(
         feature_dim=config["FEATURE_DIM"],
         id_dim=config["ID_DIM"],
-        ffn_dim_ratio=config["FFN_DIM_RATIO"],
+        ffn_dim_ratio=config.get("ID_FFN_DIM_RATIO", config["FFN_DIM_RATIO"]),
         num_layers=config["NUM_ID_DECODER_LAYERS"],
         head_dim=config["HEAD_DIM"],
         num_id_vocabulary=config["NUM_ID_VOCABULARY"],
         rel_pe_length=config["REL_PE_LENGTH"],
         use_aux_loss=config["USE_AUX_LOSS"],
         use_shared_aux_head=config["USE_SHARED_AUX_HEAD"],
+        id_fusion=config.get("ID_FUSION", "concat"),
+        pos_enc=config.get("POS_ENC", "learned_rel"),
+        spatial_anchor=bool(config.get("SPATIAL_ANCHOR", False)),
     ) if config["ONLY_DETR"] is False else None
 
     # Construct MOTIP model:

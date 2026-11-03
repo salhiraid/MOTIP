@@ -35,7 +35,8 @@ BASE = {
     "N_INIT_BACKFILL": False,          # PLAN N6
     # --- model ---
     "ONLY_DETR": False, "NUM_CLASSES": 1, "DETR_NUM_QUERIES": 300, "DEIM_NUM_DENOISING": 100,
-    "HEAD_DIM": 32, "ID_FFN_DIM_RATIO": 4, "FFN_DIM_RATIO": 4,
+    "HEAD_DIM": 32, "ID_FFN_DIM_RATIO": 4,          # ID decoder FFN ratio doubled vs MOTIP (2 -> 4) at half the width (Paper §3.1)
+    "FFN_DIM_RATIO": 2,             # trajectory-feature adapter: unchanged from MOTIP (PLAN N4)
     "USE_AUX_LOSS": False, "USE_SHARED_AUX_HEAD": True, "USE_FOCAL_LOSS": False,
     # --- data / augmentation (App. A) ---
     "SAMPLE_STEPS": [0], "SAMPLE_INTERVALS": [4], "LENGTH_PER_ITERATION": None, "SAMPLES_PER_EPOCH": 40000,

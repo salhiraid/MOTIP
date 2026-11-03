@@ -12,6 +12,11 @@ class OrderedSet:
             del self.dict[value]
         self.dict[value] = None
 
+    def push_front(self, value):
+        """Mark `value` as the next one to be reused (MOTIP2: freed dictionary slot of a discarded tentative track)."""
+        self.dict[value] = None
+        self.dict.move_to_end(value, last=False)
+
     def __len__(self):
         return len(self.dict)
 

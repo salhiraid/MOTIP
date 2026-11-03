@@ -273,6 +273,9 @@ def train_engine(config: dict):
                     area_thresh=config["AREA_THRESH"],
                     inference_only_detr=config["INFERENCE_ONLY_DETR"] if config["INFERENCE_ONLY_DETR"] is not None
                     else config["ONLY_DETR"],
+                    n_init=config.get("N_INIT", 1),
+                    rope_alpha=config.get("ROPE_ALPHA", 1.0),
+                    rope_alpha_mode=config.get("ROPE_ALPHA_MODE", "multiply"),
                 )
                 eval_metrics.sync()
                 logger.metrics(
@@ -477,6 +480,7 @@ def train_one_epoch(
             # Need to prepare for MOTIP:
             seq_info = prepare_for_motip(
                 detr_outputs=detr_outputs, annotations=annotations, detr_indices=detr_indices,
+                with_pos=bool(config.get("SPATIAL_ANCHOR", False)),
             )
             seq_info = model(seq_info=seq_info, part="trajectory_modeling")
             id_logits, id_gts, id_masks = model(
@@ -805,7 +809,7 @@ def tensor_dict_index_select(tensor_dict, index, dim=0):
     return dict(res_tensor_dict)
 
 
-def prepare_for_motip(detr_outputs, annotations, detr_indices):
+def prepare_for_motip(detr_outputs, annotations, detr_indices, with_pos: bool = False):
     _B, _T = len(annotations), len(annotations[0])
     _G, _, _N = annotations[0][0]["trajectory_id_labels"].shape
     _device = detr_outputs["pred_logits"].device
@@ -821,12 +825,17 @@ def prepare_for_motip(detr_outputs, annotations, detr_indices):
     unknown_masks = torch.ones((_B, _G, _T, _N), dtype=torch.bool, device=_device)
     unknown_boxes = torch.zeros((_B, _G, _T, _N, 4), dtype=torch.float32, device=_device)
     unknown_features = torch.zeros((_B, _G, _T, _N, _feature_dim), dtype=torch.float32, device=_device)
+    if with_pos:    # MOTIP2 Spatial Anchor: p_i of every detection token (same layout as the features)
+        trajectory_pos = torch.zeros((_B, _G, _T, _N, _feature_dim), dtype=torch.float32, device=_device)
+        unknown_pos = torch.zeros((_B, _G, _T, _N, _feature_dim), dtype=torch.float32, device=_device)
     for b in range(_B):
         for t in range(_T):
             flatten_idx = b * _T + t
             go_back_detr_idxs = torch.argsort(detr_indices[flatten_idx][1])
             detr_output_embeds = detr_outputs["outputs"][flatten_idx][detr_indices[flatten_idx][0][go_back_detr_idxs]]
             detr_boxes = detr_outputs["pred_boxes"][flatten_idx][detr_indices[flatten_idx][0][go_back_detr_idxs]]
+            if with_pos:
+                detr_pos = detr_outputs["pos_embeds"][flatten_idx][detr_indices[flatten_idx][0][go_back_detr_idxs]]
             # detr_output_embeds = einops.repeat(detr_output_embeds, "n d -> g n d", g=_G)
             # detr_boxes = einops.repeat(detr_boxes, "n d -> g n d", g=_G)
             for group in range(_G):
@@ -845,9 +854,14 @@ def prepare_for_motip(detr_outputs, annotations, detr_indices):
                 unknown_features[b, group, t, ~_curr_unk_masks] = detr_output_embeds[_curr_unk_ann_idxs[~_curr_unk_masks]]
                 trajectory_boxes[b, group, t, ~_curr_traj_masks] = detr_boxes[_curr_traj_ann_idxs[~_curr_traj_masks]]
                 unknown_boxes[b, group, t, ~_curr_unk_masks] = detr_boxes[_curr_unk_ann_idxs[~_curr_unk_masks]]
+                if with_pos:
+                    trajectory_pos[b, group, t, ~_curr_traj_masks] = detr_pos[_curr_traj_ann_idxs[~_curr_traj_masks]]
+                    unknown_pos[b, group, t, ~_curr_unk_masks] = detr_pos[_curr_unk_ann_idxs[~_curr_unk_masks]]
                 pass
             pass
+    extra = {"trajectory_pos": trajectory_pos, "unknown_pos": unknown_pos} if with_pos else {}
     return {
+        **extra,
         "trajectory_id_labels": trajectory_id_labels,
         "trajectory_times": trajectory_times,
         "trajectory_masks": trajectory_masks,

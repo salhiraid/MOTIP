@@ -46,6 +46,8 @@ class MOTIP(nn.Module):
                     return self.detr(samples=frames)
             case "trajectory_modeling":
                 seq_info = kwargs["seq_info"]
+                if self.trajectory_modeling is None:      # MOTIP2 flag TRAJECTORY_MODELING=False
+                    return seq_info
                 return self.trajectory_modeling(seq_info)
             case "id_decoder":
                 seq_info = kwargs["seq_info"]
