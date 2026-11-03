@@ -8,7 +8,7 @@ implemented and **which test proves it**. "Proves" is graded honestly:
 * **WIRING** — the flag/number reaches the module (a config or plumbing check). Necessary, not sufficient.
 * **NOT VERIFIED** — needs real data, a GPU or TensorRT; nothing here claims it works.
 
-Run everything: `python -m pytest tests -q` (see the count at the end of the run, ~12 min on 4 CPU cores). `-m "not slow"` skips the detector-overfit and end-to-end/DDP tests (~5 min saved).
+Run everything: `python -m pytest tests -q` (209 tests, ~14 min on 4 CPU cores). `-m "not slow"` skips the detector-overfit and end-to-end/DDP tests (~5 min saved).
 
 ## A. Requirements → code → proof
 
