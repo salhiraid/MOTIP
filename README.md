@@ -76,4 +76,5 @@ If you think this project is helpful, please feel free to leave a :star: and cit
 
 
 ## MOTIP2
-This branch also contains an implementation of MOTIP2 (DEIM detector, RoPE ID decoder, Spatial ID Switches / Loss / Anchor, tracklet confirmation). See [docs/MOTIP2.md](./docs/MOTIP2.md), `PLAN.md` and `RESULTS.md`.
+This branch also contains an implementation of MOTIP2 (DEIM detector, RoPE ID decoder, Spatial ID Switches / Loss / Anchor, tracklet confirmation).
+**Start with [README_MOTIP2.md](./README_MOTIP2.md)** (what was done, how to run it, verification status); details in [docs/MOTIP2.md](./docs/MOTIP2.md), `PLAN.md` and `RESULTS.md`.
