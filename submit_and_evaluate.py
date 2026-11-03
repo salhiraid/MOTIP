@@ -334,6 +334,10 @@ def submit_and_evaluate_one_model(
         metrics["AssRe"].update(eval_metrics_dict["AssRe"])
         metrics["MOTA"].update(eval_metrics_dict["MOTA"])
         metrics["IDF1"].update(eval_metrics_dict["IDF1"])
+        # MOTIP2 PLAN Phase 1: also log IDSW / FP / FN (needed for RESULTS.md and Tab. 9 comparisons).
+        for _k in ["IDSW", "CLR_FP", "CLR_FN"]:
+            if _k in eval_metrics_dict:
+                metrics[_k].update(eval_metrics_dict[_k])
         logger.success(
             log=f"Get evaluation metrics from {eval_metrics_path}.",
             only_main=True,

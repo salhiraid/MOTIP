@@ -15,7 +15,7 @@ Paper reference numbers live in `PLAN.md` §7. Latency: report the ratio S/MOTIP
 | Gate | Phase | Status | Evidence / measured value | Date |
 |---|---|---|---|---|
 | 0 | Recon + PLAN.md | **Written, awaiting user approval** | `PLAN.md` incl. skill-§1 traceability matrix | 2026-11-03 |
-| 1 | Baseline MOTIP (DanceTrack val, target 64.0 ±0.5) | not started | needs GPU + datasets + released checkpoint | — |
+| 1 | Baseline MOTIP (DanceTrack val, target 64.0 ±0.5) | **DEFERRED (cannot run here)** | Tooling done (IDSW capture, `tools/log_result.py`); eval needs GPU + datasets + released checkpoint. Work proceeds on user instruction ("start implementing everything"); documented deviation from §0.3 — must still be run before any metric claim. | 2026-11-03 |
 | 2 | DEIM detector (DetA recorded, latency recorded) | not started | — | — |
 | 3 | ID decoder (unit + α sweep) | not started | — | — |
 | 4 | Spatial Anchor | not started | — | — |
