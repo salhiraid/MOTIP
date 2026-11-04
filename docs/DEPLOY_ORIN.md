@@ -1,7 +1,7 @@
 # MOTIP2 on a Jetson Orin: ONNX export (S and M) → TensorRT FP16 / INT8
 
-What this repository gives you: the **ONNX files** (detector and ID decoder, separately), verified against PyTorch with onnxruntime
-and inside the real tracker loop. What it does **not** give you, because there is no TensorRT, no Jetson and no GPU in the
+What this repository gives you: the **ONNX file** (by default ONE graph, `motip2.onnx` = detector + trajectory adapter + ID decoder;
+two separate graphs with `--format separate`), verified against PyTorch with onnxruntime and inside the real tracker loop. What it does **not** give you, because there is no TensorRT, no Jetson and no GPU in the
 development environment: TensorRT engines, INT8 calibration, latency, or accuracy after quantisation. Everything under "On the Orin"
 below is therefore a procedure, not a result. Quantise on the Orin as you planned and check it with the HOTA procedure of §6.
 
@@ -17,9 +17,10 @@ CKPT_S=outputs/s_vehicles_kp/checkpoint_9.pth CKPT_M=outputs/m_vehicles_kp/check
 which runs, per size, the single-size command
 ```bash
 python tools/export_onnx.py --config configs/motip2/s_vehicles_kp.yaml --ckpt outputs/s_vehicles_kp/checkpoint_9.pth \
-    --out-dir export/orin/s --height 800 --width 1440 --verify
+    --out-dir export/orin/s --height 800 --width 1440 --format single --verify
 ```
-Output per size: `detector.onnx`, `id_decoder.onnx`, `export_meta.json` (input/output names and shapes, thresholds, RoPE α,
+Output per size: `motip2.onnx` (one graph), `export_meta.json` (`--format separate` writes `detector.onnx` + `id_decoder.onnx` instead,
+`--format both` all three) (input/output names and shapes, thresholds, RoPE α,
 the **operator list** of both graphs, the opset the file really declares, verification numbers). `--verify` compares onnxruntime
 with PyTorch (detector set-wise, ID decoder at five shapes); the same checks pass in `tests/test_export_onnx.py` for S and M.
 Use `--num-keypoints 0` to export a keypoint checkpoint without the keypoint outputs, `--only detector|id_decoder` for one graph.
@@ -44,7 +45,36 @@ shorter side). Below that range (e.g. 480) accuracy was **not measured** — if 
 Frame pre-processing for the engine = exactly `data/seq_dataset.py`: RGB, `float32`, `x/255` in [0,1], **no mean/std normalisation**
 (`IMAGE_NORMALIZE: false`).
 
-## 3. What the two graphs contain and what stays outside
+## 3a. The single graph `motip2.onnx` (default)
+
+One call = the neural part of one tracker step:
+
+| inputs | |
+|---|---|
+| `x` (1,3,H,W) float32 | the frame (§2) |
+| `det_thresh` (1,) float32 | `DET_THRESH` (0.3 in the vehicle configs) |
+| `traj_feat` (T,N,D) `traj_pos` (T,N,D) `traj_ids` (T,N) int64 `traj_times` (T,N) int64 `traj_masks` (T,N) bool | the tracker's context buffer (T ≤ 64 frames, N ≤ 300 tracks, both dynamic) |
+
+| outputs | |
+|---|---|
+| `logits` (1,300,C) `boxes` (1,300,4) `emb` (1,300,D) `pos` (1,300,D) [`kpts` (1,300,K,2) `kpt_vis` (1,300,K)] | as in the table of §3 |
+| `id_logits` (300, K_id+1) | ID-decoder logits for **all 300 queries**; only the rows of queries with `max sigmoid(logits) > det_thresh` are meaningful |
+
+How the two networks became one without changing the result: the ID decoder normally sees only the detections above the threshold,
+and its second and later layers let those tokens attend to each other. Here it sees all 300 queries but the ones at or below
+`det_thresh` are put in its key-padding mask, so they are invisible as keys: the selected rows equal what the two-graph pipeline
+returns (tested: ≤ 3e-6 at five trajectory shapes incl. T=1; a control without the mask differs by > 1e-3). Costs and caveats:
+* the decoder computes 300 rows instead of the ~10–40 selected ones — more compute per frame than the two-graph pipeline (not
+  measured); if that matters on the Orin use `--format separate`, where it only runs on the selected detections;
+* **first frame of a sequence**: no trajectory yet → feed a dummy buffer (T=2, N=1, `traj_masks`=True, zeros) and **ignore `id_logits`**
+  (all detections are newborn); rows of unselected queries, and everything when nothing is selected, can be NaN — ignore them;
+* the area filter (`AREA_THRESH`, 0 in the vehicle configs) is applied outside; with a non-zero value the decoder context would include
+  detections that the tracker later drops, so keep it 0 or use `--format separate`;
+* **outside the graph** (reference: `models/runtime_tracker.py` + `tools/onnx_runtime_model.py`, which runs this very file inside the real
+  tracker and gives identical tracks to PyTorch): select detections, `object-max` readout with `ID_THRESH`, newborn threshold, tracklet
+  confirmation `N_INIT`, and **updating the context buffer** with `emb`/`pos`/ids of the tracked detections for the next call.
+
+## 3. What the two graphs contain and what stays outside (`--format separate`)
 
 | | inputs | outputs |
 |---|---|---|
@@ -65,7 +95,18 @@ and use `GridSample`, `TopK`, `LayerNormalization`, `Resize`, `GatherElements`, 
 TensorRT whose ONNX parser supports opset 18 and those operators (JetPack 6.x); on older JetPacks `trtexec` will tell you
 which node it rejects. Always run the parser first: `trtexec --onnx=detector.onnx --skipInference`.
 
-**FP16**
+**FP16, single graph** (the default export)
+```bash
+trtexec --onnx=export/orin/s/motip2.onnx --skipInference                       # parser / operator check first
+trtexec --onnx=export/orin/s/motip2.onnx --fp16 --saveEngine=motip2_s_fp16.engine \
+  --minShapes=traj_feat:1x1x256,traj_pos:1x1x256,traj_ids:1x1,traj_times:1x1,traj_masks:1x1 \
+  --optShapes=traj_feat:30x30x256,traj_pos:30x30x256,traj_ids:30x30,traj_times:30x30,traj_masks:30x30 \
+  --maxShapes=traj_feat:64x300x256,traj_pos:64x300x256,traj_ids:64x300,traj_times:64x300,traj_masks:64x300
+```
+(`x` and `det_thresh` are static.) A context of T=1 frame occurs once per sequence (2nd frame). onnxruntime accepts it (tested); whether your TensorRT build accepts a profile minimum of 1
+is untested here — if it refuses, that one frame per sequence needs the `--format separate` export (or a T=2 minimum and an extra step on your side).
+
+**FP16, two graphs** (`--format separate`)
 ```bash
 trtexec --onnx=export/orin/s/detector.onnx --fp16 --saveEngine=detector_s_fp16.engine
 trtexec --onnx=export/orin/s/id_decoder.onnx --fp16 --saveEngine=id_decoder_s_fp16.engine \
@@ -86,7 +127,7 @@ supports `bool`; if your version rejects either, cast in the runtime and tell me
 * The only valid acceptance test is §6: engines inside the tracker on your `val` split vs the FP32 ONNX numbers.
 
 Quickest path while you evaluate: `OnnxMOTIP("export/orin/s", providers=("TensorrtExecutionProvider", "CUDAExecutionProvider"))`
-(`tools/onnx_runtime_model.py`) runs the same graphs through onnxruntime's TensorRT provider (FP16/INT8 via its provider options) —
+(`tools/onnx_runtime_model.py`; for the single graph call `model.attach(tracker)` after building the `RuntimeTracker`) runs the same graphs through onnxruntime's TensorRT provider (FP16/INT8 via its provider options) —
 convenient for accuracy checks, not necessarily the fastest deployment.
 
 ## 5. Sizes

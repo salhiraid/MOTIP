@@ -20,10 +20,16 @@
   "INFERENCE_MAX_SHORTER": 800,
   "INFERENCE_MAX_LONGER": 1440
  },
- "detector": {
-  "file": "detector.onnx",
+ "single": {
+  "file": "motip2.onnx",
   "inputs": [
-   "x"
+   "x",
+   "det_thresh",
+   "traj_feat",
+   "traj_pos",
+   "traj_ids",
+   "traj_times",
+   "traj_masks"
   ],
   "outputs": [
    "logits",
@@ -31,16 +37,21 @@
    "emb",
    "pos",
    "kpts",
-   "kpt_vis"
+   "kpt_vis",
+   "id_logits"
   ],
-  "hidden_dim": 256,
+  "dim": 256,
+  "K": 50,
+  "num_queries": 300,
   "num_keypoints": 31,
+  "spatial_anchor": true,
   "onnx_ops": [
    "Add",
    "And",
    "Cast",
    "Clip",
    "Concat",
+   "ConstantOfShape",
    "Conv",
    "Cos",
    "Div",
@@ -48,17 +59,22 @@
    "Expand",
    "Gather",
    "GatherElements",
+   "GatherND",
    "Gemm",
    "Greater",
+   "GreaterOrEqual",
    "GridSample",
+   "IsNaN",
    "LayerNormalization",
    "Less",
+   "LessOrEqual",
    "Log",
    "MatMul",
    "Max",
    "MaxPool",
    "Min",
    "Mul",
+   "Not",
    "Pad",
    "ReduceMax",
    "ReduceMean",
@@ -67,6 +83,7 @@
    "Relu",
    "Reshape",
    "Resize",
+   "Shape",
    "Sigmoid",
    "Sin",
    "Slice",
@@ -80,61 +97,7 @@
    "Unsqueeze",
    "Where"
   ],
-  "preprocessing": "RGB, float32, x/255 in [0,1], NO mean/std normalisation; resize/pad the frame to (H, W) = detector_resolution_HW",
-  "opset_in_file": 18
- },
- "id_decoder": {
-  "file": "id_decoder.onnx",
-  "inputs": [
-   "traj_feat",
-   "traj_pos",
-   "traj_ids",
-   "traj_times",
-   "traj_masks",
-   "unk_feat",
-   "unk_pos",
-   "unk_masks",
-   "unk_times"
-  ],
-  "outputs": [
-   "logits"
-  ],
-  "dim": 256,
-  "K": 50,
-  "onnx_ops": [
-   "Add",
-   "And",
-   "Cast",
-   "Concat",
-   "ConstantOfShape",
-   "Cos",
-   "Div",
-   "Erf",
-   "Expand",
-   "Gather",
-   "GatherND",
-   "Gemm",
-   "GreaterOrEqual",
-   "IsNaN",
-   "LayerNormalization",
-   "MatMul",
-   "Mul",
-   "Not",
-   "Pad",
-   "Reshape",
-   "Shape",
-   "Sin",
-   "Slice",
-   "Softmax",
-   "Split",
-   "Squeeze",
-   "Sub",
-   "Transpose",
-   "Unsqueeze",
-   "Where"
-  ],
   "opset_in_file": 18,
-  "spatial_anchor": true,
   "dynamic_axes": {
    "T": [
     2,
@@ -143,20 +106,17 @@
    "N": [
     1,
     300
-   ],
-   "M": [
-    1,
-    300
    ]
-  }
+  },
+  "det_thresh_input": "shape (1,) float32 = DET_THRESH; queries with max-sigmoid score <= it are ignored by the ID decoder",
+  "first_frame": "no trajectory yet: feed traj_* with T=2, N=1, traj_masks=True and ignore id_logits",
+  "preprocessing": "RGB, float32, x/255 in [0,1], NO mean/std normalisation; resize/pad to (H, W) = detector_resolution_HW"
  },
  "verification": {
-  "detector": {
+  "single": {
    "boxes_found": 1.0,
-   "max_diff_matched": 2.384185791015625e-06
-  },
-  "id_decoder": {
-   "max_diff": 2.86102294921875e-06
+   "max_diff_detector_outputs": 2.384185791015625e-06,
+   "max_diff_id_logits_vs_two_graph_pipeline": 3.0994415283203125e-06
   }
  }
 }

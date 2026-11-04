@@ -163,6 +163,109 @@ def verify_detector(wrap, path, height, width, n_inputs=2, box_tol=1e-3):
     return worst_found, worst_other
 
 
+class CombinedExport(nn.Module):
+    """Detector + trajectory adapter + ID decoder in ONE graph (`motip2.onnx`).
+
+    One call = one tracker step for the neural part:
+        x (1,3,H,W), det_thresh (1,), the trajectory buffer (T,N,...)  ->  detector outputs + `id_logits` (Q, K+1)
+    The ID decoder is run on ALL Q queries; the ones with max-sigmoid score <= det_thresh are marked in its key-padding mask, so
+    they are invisible as keys in the decoder's self-attention and every selected detection gets exactly the logits it would get if
+    only the selected detections were passed (verified against the two-graph pipeline). Rows of unselected queries are garbage
+    (and NaN if nothing is selected): ignore them. Outside the graph stay: thresholding/area filter, the readout, newborn logic,
+    tracklet confirmation and updating the trajectory buffer with emb/pos of the tracked detections.
+    First frame of a sequence (no trajectory yet): pass a dummy buffer of T=2, N=1 with `traj_masks` all True and ignore `id_logits`."""
+
+    def __init__(self, motip):
+        super().__init__()
+        self.det = DetectorExport(motip.detr)
+        self.idw = IDDecoderExport(motip, bool(motip.id_decoder.spatial_anchor))
+        self.use_pos = self.idw.use_pos
+        self.with_keypoints = self.det.with_keypoints
+
+    def forward(self, x, det_thresh, *traj):
+        outs = self.det(x)
+        scores = outs[0][0].sigmoid().max(-1)[0]                          # (Q,) as RuntimeTracker._get_activate_detections
+        umask = scores <= det_thresh[0]                                    # True = not a detection
+        ut = torch.zeros(scores.shape[0], dtype=torch.int64) + traj[0].shape[0]     # unknown time = current time index = T
+        emb, pos = outs[2][0], outs[3][0]
+        if self.use_pos:
+            tf, tp, tid, tt, tm = traj
+            logits = self.idw(tf, tp, tid, tt, tm, emb, pos, umask, ut)
+        else:
+            tf, tid, tt, tm = traj
+            logits = self.idw(tf, tid, tt, tm, emb, umask, ut)
+        return tuple(outs) + (logits,)
+
+
+def combined_input_names(use_pos):
+    return ["x", "det_thresh"] + (["traj_feat", "traj_pos", "traj_ids", "traj_times", "traj_masks"] if use_pos
+                                  else ["traj_feat", "traj_ids", "traj_times", "traj_masks"])
+
+
+def combined_output_names(wrap):
+    return DETECTOR_OUTPUT_NAMES + (KEYPOINT_OUTPUT_NAMES if wrap.with_keypoints else []) + ["id_logits"]
+
+
+def export_combined(motip, path, height, width, max_context=64, max_tracks=300, opset=18):
+    wrap = CombinedExport(motip).eval()
+    D, K = motip.id_decoder.feature_dim, motip.id_decoder.num_id_vocabulary
+    names = combined_input_names(wrap.use_pos)
+    T, N = torch.export.Dim("T", min=2, max=max_context), torch.export.Dim("N", min=1, max=max_tracks)
+    traj = id_decoder_inputs(6, 4, 1, D, K, wrap.use_pos)[:5 if wrap.use_pos else 4]
+    args = (torch.rand(1, 3, height, width), torch.tensor([0.3])) + tuple(traj)
+    prog = torch.onnx.export(wrap, args, dynamo=True, input_names=names, output_names=combined_output_names(wrap),
+                             opset_version=opset,
+                             dynamic_shapes={"x": None, "det_thresh": None, "traj": tuple({0: T, 1: N} for _ in traj)})
+    prog.save(path)
+    return wrap, names, D, K
+
+
+def verify_combined(wrap, path, height, width, D, K, shapes=((6, 4), (11, 9), (3, 1), (1, 3), (20, 30)), n_select=6):
+    """(a) detector outputs set-wise vs PyTorch, (b) id_logits of the SELECTED queries vs the two-graph pipeline (PyTorch ID decoder
+    fed with only the selected detections of the same ONNX run), at several trajectory shapes incl. T=1."""
+    import onnxruntime as ort
+    sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+    names = [i.name for i in sess.get_inputs()]
+    onames = [o.name for o in sess.get_outputs()]
+    worst_found, worst_other, worst_id = 1.0, 0.0, 0.0
+    for i, (T, N) in enumerate(shapes):
+        torch.manual_seed(i)
+        x = torch.rand(1, 3, height, width)
+        traj = id_decoder_inputs(T, N, 1, D, K, wrap.use_pos, seed=i)[:5 if wrap.use_pos else 4]
+        feed = {"x": x.numpy(), **{n: t.numpy() for n, t in zip(names[2:], traj)}}
+        scores = torch.from_numpy(sess.run(None, {**feed, "det_thresh": np.array([2.0], np.float32)})[0][0]).sigmoid().max(-1)[0]
+        top = scores.sort(descending=True)[0][:n_select + 8]
+        # put the threshold in the LARGEST gap among the top scores (untrained networks have near-tied scores, and a threshold
+        # inside a tie would be decided by 1-ulp differences between runtimes -> a different detection set, not a numerical error)
+        gaps = top[n_select - 3:n_select + 3] - top[n_select - 2:n_select + 4]
+        k = n_select - 3 + int(gaps.argmax())
+        thr = float((top[k] + top[k + 1]) / 2)
+        out = sess.run(None, {**feed, "det_thresh": np.array([thr], np.float32)})
+        o = {n: (v if n == "id_logits" else v[0]) for n, v in zip(onames, out)}     # id_logits has no batch dim
+        sel = torch.from_numpy(o["logits"]).sigmoid().max(-1)[0] > thr
+        idx = sel.nonzero()[:, 0]
+        # (a) detector part
+        with torch.no_grad():
+            ref = [r.numpy()[0] for r in wrap.det(x)]
+        got = [o[n] for n in onames[:len(ref)]]
+        if i == 0:
+            d = np.abs(got[1][:, None] - ref[1][None]).sum(-1)
+            ok = d.min(1) < 1e-3
+            worst_found = float(ok.mean())
+            j = d.argmin(1)
+            for k in range(len(ref)):
+                if k != 1:
+                    worst_other = max(worst_other, float(np.abs(got[k][ok] - ref[k][j[ok]]).max()))
+        # (b) ID part: separate-graph pipeline on the selected detections
+        M = len(idx)
+        emb, pos = torch.from_numpy(o["emb"])[idx], torch.from_numpy(o["pos"])[idx]
+        umask, ut = torch.zeros(M, dtype=torch.bool), torch.full((M,), T)
+        with torch.no_grad():
+            sep = wrap.idw(*traj[:5], emb, pos, umask, ut) if wrap.use_pos else wrap.idw(*traj[:4], emb, umask, ut)
+        worst_id = max(worst_id, float(np.abs(o["id_logits"][idx.numpy()] - sep.numpy()).max()))
+    return worst_found, worst_other, worst_id
+
+
 def onnx_opset(path):
     """The opset the file REALLY declares (the dynamo exporter may emit a higher one than requested)."""
     import onnx
@@ -186,7 +289,9 @@ def main(argv=None):
     ap.add_argument("--max-context", type=int, default=64)
     ap.add_argument("--max-tracks", type=int, default=300)
     ap.add_argument("--verify", action="store_true")
-    ap.add_argument("--only", choices=["detector", "id_decoder"], default=None)
+    ap.add_argument("--only", choices=["detector", "id_decoder"], default=None, help="(separate format) export one graph only")
+    ap.add_argument("--format", choices=["separate", "single", "both"], default="separate",
+                    help="separate = detector.onnx + id_decoder.onnx; single = ONE motip2.onnx (detector + ID decoder); both")
     ap.add_argument("--num-keypoints", type=int, default=None, help="override NUM_KEYPOINTS of the config (must match the checkpoint)")
     a = ap.parse_args(argv)
 
@@ -209,7 +314,26 @@ def main(argv=None):
                 "DET_THRESH", "NEWBORN_THRESH", "ID_THRESH", "MISS_TOLERANCE", "N_INIT", "N_INIT_TTL", "ROPE_ALPHA",
                 "ROPE_ALPHA_MODE", "ASSIGNMENT_PROTOCOL", "INFERENCE_MAX_SHORTER", "INFERENCE_MAX_LONGER")}}
     report = {}
-    if a.only != "id_decoder":
+    if a.format in ("single", "both"):
+        p = os.path.join(a.out_dir, "motip2.onnx")
+        wrap, names, D, K = export_combined(motip, p, a.height, a.width, a.max_context, a.max_tracks, a.opset)
+        meta["single"] = {"file": "motip2.onnx", "inputs": names, "outputs": combined_output_names(wrap), "dim": D, "K": K,
+                          "num_queries": int(cfg["DETR_NUM_QUERIES"]), "num_keypoints": int(cfg.get("NUM_KEYPOINTS", 0) or 0),
+                          "spatial_anchor": wrap.use_pos, "onnx_ops": onnx_ops(p), "opset_in_file": onnx_opset(p),
+                          "dynamic_axes": {"T": [2, a.max_context], "N": [1, a.max_tracks]},
+                          "det_thresh_input": "shape (1,) float32 = DET_THRESH; queries with max-sigmoid score <= it are ignored by the ID decoder",
+                          "first_frame": "no trajectory yet: feed traj_* with T=2, N=1, traj_masks=True and ignore id_logits",
+                          "preprocessing": "RGB, float32, x/255 in [0,1], NO mean/std normalisation; resize/pad to (H, W) = detector_resolution_HW"}
+        print(f"wrote {p}  (opset {meta['single']['opset_in_file']})")
+        if a.verify:
+            found, other, idd = verify_combined(wrap, p, a.height, a.width, D, K)
+            report["single"] = {"boxes_found": found, "max_diff_detector_outputs": other, "max_diff_id_logits_vs_two_graph_pipeline": idd}
+            print(f"  single graph: detector set-wise {100 * found:.1f}% found, max |diff| {other:.2e}; selected id_logits vs the "
+                  f"two-graph pipeline (5 trajectory shapes, T=1 included): max |diff| = {idd:.2e}")
+            assert found >= 0.95 and other < 1e-3 and idd < 1e-3, "single-graph ONNX parity failed"
+    if a.format == "single":
+        a.only = "__none__"
+    if a.only not in ("id_decoder", "__none__"):
         p = os.path.join(a.out_dir, "detector.onnx")
         wrap = export_detector(motip, p, a.height, a.width, a.opset)
         meta["detector"] = {"file": "detector.onnx", "inputs": ["x"], "outputs": detector_output_names(wrap),
@@ -228,7 +352,7 @@ def main(argv=None):
                   f"max |diff| of matched logits/emb/pos = {diff:.2e}")
             # <100% is expected only for near-tied (untrained) scores: queries at the top-k boundary may swap. Matched queries are exact.
             assert found >= 0.95 and diff < 1e-3, "detector ONNX parity failed"
-    if a.only != "detector":
+    if a.only not in ("detector", "__none__"):
         p = os.path.join(a.out_dir, "id_decoder.onnx")
         wrap, names, use_pos, D, K = export_id_decoder(motip, cfg, p, a.max_context, a.max_tracks, a.max_tracks, a.opset)
         meta["id_decoder"] = {"file": "id_decoder.onnx", "inputs": names, "outputs": ["logits"], "dim": D, "K": K,
