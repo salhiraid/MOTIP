@@ -83,9 +83,38 @@ def load_source(path, which):
     return out
 
 
-def build_target(size, num_classes):
+def build_target(size, num_classes, num_keypoints=0, keypoint_hidden_layers=4):
     from models.deim.builder import build_deim
-    return build_deim(size, num_classes=num_classes, num_queries=300)
+    return build_deim(size, num_classes=num_classes, num_queries=300, num_keypoints=num_keypoints,
+                      keypoint_hidden_layers=keypoint_hidden_layers)
+
+
+# mmdet DFINEHead keypoint branches: `kps_xy_branches.0` / `kps_vis_branches.0` = nn.Sequential(Linear, ReLU, ..., Linear)
+# (one branch shared by all decoder layers), mapped 1:1 onto models/deim/keypoints.py (`xy_branch` / `vis_branch`).
+KP_PATTERNS = {"xy_branch": re.compile(r"(?:^|\.)kps_xy_branches\.0\.(\d+)\.(weight|bias)$"),
+               "vis_branch": re.compile(r"(?:^|\.)kps_vis_branches\.0\.(\d+)\.(weight|bias)$")}
+
+
+def split_keypoint_tensors(src):
+    """-> (source without keypoint tensors, {target key: tensor}, K, hidden_layers). K = 0 when there is no keypoint head."""
+    rest, kp, last = {}, {}, {}
+    for k, v in src.items():
+        for branch, pat in KP_PATTERNS.items():
+            m = pat.search(k)
+            if m:
+                kp[f"keypoint_head.{branch}.{m.group(1)}.{m.group(2)}"] = v
+                if m.group(2) == "weight":
+                    last[branch] = max(last.get(branch, (-1, None)), (int(m.group(1)), v.shape[0]))
+                break
+        else:
+            rest[k] = v
+    if not kp:
+        return src, {}, 0, 0
+    assert set(last) == {"xy_branch", "vis_branch"}, f"incomplete keypoint branches in the source: {sorted(last)}"
+    (ix, ox), (iv, ov) = last["xy_branch"], last["vis_branch"]
+    assert ix == iv and ix % 2 == 0, f"xy/vis keypoint branches differ in depth ({ix} vs {iv})"
+    assert ox == 2 * ov, f"xy branch has {ox} outputs but the visibility branch {ov} (expected 2x)"
+    return rest, kp, ov, ix // 2
 
 
 def slice_classes(src, src_classes, class_indices):
@@ -175,6 +204,8 @@ def main(argv=None):
     ap.add_argument("--num-classes", type=int, default=5, help="classes of the TARGET (and normally the source) head")
     ap.add_argument("--src-num-classes", type=int, default=None, help="if the source head has a different class count")
     ap.add_argument("--class-indices", type=int, nargs="+", default=None, help="source rows -> target classes")
+    ap.add_argument("--num-keypoints", type=int, default=None,
+                    help="default: detected from the source (kps_xy_branches / kps_vis_branches); 0 drops them")
     ap.add_argument("--out", default=None)
     ap.add_argument("--inspect", default=None, help="write source/target key+shape listings to this file and stop")
     ap.add_argument("--allow-partial", action="store_true", help="save even if required target tensors are unmatched")
@@ -182,8 +213,21 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     src = load_source(a.ckpt, a.which)
-    tmodel = build_target(a.size, a.num_classes)
-    tgt = tmodel.state_dict()
+    src, kp_state, K, L = split_keypoint_tensors(src)
+    if a.num_keypoints is not None and a.num_keypoints != K:
+        if a.num_keypoints == 0:
+            kp_state, K = {}, 0
+        else:
+            raise SystemExit(f"--num-keypoints {a.num_keypoints} but the source head has {K}")
+    if K:
+        print(f"keypoint head found in the source: {K} keypoints, {L} hidden layers per branch")
+    tmodel = build_target(a.size, a.num_classes, K, L or 4)
+    tgt_full = tmodel.state_dict()
+    tgt = {k: v for k, v in tgt_full.items() if not k.startswith("keypoint_head.")}      # aligned explicitly, not by similarity
+    for k, v in kp_state.items():
+        assert k in tgt_full and tgt_full[k].shape == v.shape, \
+            f"keypoint tensor {k}: source {tuple(v.shape)} vs target {tuple(tgt_full[k].shape) if k in tgt_full else None} " \
+            f"(the keypoint MLP must be hidden_dim wide = the DEIM decoder width)"
 
     if a.inspect:
         with open(a.inspect, "w") as f:
@@ -220,7 +264,8 @@ def main(argv=None):
         print("REFUSING to write the checkpoint: required tensors are unmatched (see report). Send me the --inspect file.")
         return 2
 
-    new_state = dict(tgt)                                  # unmatched optional tensors keep their initial values
+    new_state = dict(tgt_full)                             # unmatched optional tensors keep their initial values
+    new_state.update(kp_state)                             # converted keypoint head (empty without one)
     for t, (s, _, _) in mapping.items():
         v = src[s]
         new_state[t] = v.to(tgt[t].dtype) if v.shape == tgt[t].shape else tgt[t]
@@ -229,14 +274,17 @@ def main(argv=None):
             print(f"WARNING {k}: converted value {new_state[k].tolist()} != expected {tgt[k].tolist()}")
     if a.out:
         from models.deim.wrapper import load_deim_pretrain
-        check = build_target(a.size, a.num_classes)
+        check = build_target(a.size, a.num_classes, K, L or 4)
         load_deim_pretrain(check, state=new_state)         # strict load round-trip
         check.eval()
         with torch.no_grad():
             o = check(torch.rand(1, 3, 224, 320))
         assert torch.isfinite(o["pred_logits"]).all() and torch.isfinite(o["pred_boxes"]).all()
+        if K:
+            assert o["pred_keypoints"].shape[-2:] == (K, 2) and torch.isfinite(o["pred_keypoints"]).all()
         os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
         torch.save({"model": new_state, "meta": {"converted_from": a.ckpt, "size": a.size, "num_classes": a.num_classes,
+                                                 "num_keypoints": K, "keypoint_hidden_layers": L,
                                                  "ambiguous": len(ambiguous)}}, a.out)
         print(f"saved {a.out} (strict load + forward OK; {len(ambiguous)} ambiguous matches -> run the detection-only check)")
     return 0

@@ -35,9 +35,13 @@ class OnnxMOTIP(nn.Module):
         if part == "detr":
             x = self._np(frames.tensors if hasattr(frames, "tensors") else frames).astype(np.float32)
             assert tuple(x.shape[-2:]) == self.expected_hw, f"detector was exported for {self.expected_hw}, got {x.shape[-2:]}"
-            logits, boxes, emb, pos = self.det.run(None, {"x": x})
-            return {"pred_logits": torch.from_numpy(logits), "pred_boxes": torch.from_numpy(boxes),
-                    "outputs": torch.from_numpy(emb), "pos_embeds": torch.from_numpy(pos)}
+            outs = self.det.run(None, {"x": x})
+            logits, boxes, emb, pos = outs[:4]
+            res = {"pred_logits": torch.from_numpy(logits), "pred_boxes": torch.from_numpy(boxes),
+                   "outputs": torch.from_numpy(emb), "pos_embeds": torch.from_numpy(pos)}
+            if len(outs) == 6:                                # detector exported with keypoints: xy (1,Q,K,2), visibility logits (1,Q,K)
+                res["pred_keypoints"], res["pred_keypoint_vis"] = torch.from_numpy(outs[4]), torch.from_numpy(outs[5])
+            return res
         if part == "trajectory_modeling":
             return seq_info                                   # the adapter is part of id_decoder.onnx
         if part == "id_decoder":

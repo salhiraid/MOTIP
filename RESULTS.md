@@ -75,3 +75,32 @@ not benchmark accuracy. Method details and the full requirement→test map: `AUD
 ### Defects found by this campaign (all fixed + regression tests)
 D15 detector-only eval emitted nothing with `N_INIT=2` · D17 logger hard-coded `cuda` / NCCL-only reduce, metrics first seen after step 0 never synced ·
 D18 synthetic-data bugs found by strict tests (colour contrast, stripe precedence, nonlinear motion) — converter itself was correct (GT equals generator truth to 0.01 px).
+
+## 6. Multi-dataset training (public tracking datasets) — what was measured
+Added: unified layout/loader (`data/unified_mot.py`), 11 converters (`data/converters/`, CLI `tools/prepare_dataset.py`), exact per-dataset epoch
+shares + per-dataset frame-interval caps (`NaiveSampler`), per-dataset classification-loss masking (`CLASS_MASKING`), `tools/gen_mix_config.py`,
+`tools/eval_datasets.py`, `docs/DATASETS.md`. Measured on SYNTHETIC data only (no accuracy numbers exist for any mixture):
+
+| Check | Result |
+|---|---|
+| Every converter on a tiny dataset in the dataset's native format → loader | boxes within 0.02 px, unified classes, constant ids, splits, distractor/ignore rows |
+| 3D projections (nuScenes, AV2, generic) vs independent corner projection | max error < 0.05 px; translated + yawed ego; AV2 moving ego between lidar and camera time |
+| Mutation checks (drop AV2 ego-motion / nuScenes ego translation / near-plane clipping) | each makes the tests fail |
+| Mixed sampling | exact shares (600/300/100 of 1000; 33/33/34 of 100), deterministic per epoch, small pools fully cycled, interval caps respected |
+| Class masking | zero gradient on masked columns, unchanged on annotated ones, bit-identical without masks; survives augmentation + collate |
+| CPU end-to-end (train + in-loop eval on 2 converted datasets) | runs, finite losses |
+Open: converters on real downloads; FastTracker class ids; UAVDT test list; Waymo v2 column names; I-24 3D reader (none); effect of any mixture on HOTA.
+
+## 7. Keypoints and Orin export — what was measured (synthetic / CPU only)
+| Check | Result |
+|---|---|
+| Keypoints decoded inside the same query's box; box gets no keypoint gradient | exact |
+| OKS loss vs the COCO formula (analytic, pixel units, per-keypoint sigmas) | exact (1e-6) |
+| Visibility target independent of the batch contents (the mmdet code's is not) | tested |
+| Toy learning: head trained with the keypoint loss vs lr = 0 control | error 0.35x lower or better (and < 6 px on 100 px) |
+| Real detector + criterion: keypoint losses on matched queries, gradients reach the head | yes |
+| Augmentation (flip + pairs, resize, zoom-out, IoU crop with points leaving the crop, normalise) | exact geometry |
+| CPU train (keypoint images + tracking) and tracking: one keypoint row per output box | yes |
+| mmdet `kps_xy_branches.0` / `kps_vis_branches.0` converter | exact tensor mapping; inconsistent branches rejected |
+| ONNX S and M with 31 keypoints, detector + ID decoder | parity < 1e-3; opset in file = 18 (requested 17 is raised by the exporter, now reported); ORT-in-tracker == PyTorch |
+Open: keypoint accuracy and its effect on HOTA on real data; TensorRT FP16/INT8 engines and latency on the Orin; the user's metafile values (sigmas, flip pairs).

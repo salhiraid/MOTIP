@@ -117,7 +117,7 @@ class RuntimeTracker:
     @torch.no_grad()
     def update(self, image):
         detr_out = self.model(frames=image, part="detr")
-        scores, categories, boxes, output_embeds, pos = self._get_activate_detections(detr_out=detr_out)
+        scores, categories, boxes, output_embeds, pos, kps = self._get_activate_detections(detr_out=detr_out)
         if self.only_detr:
             id_pred_labels = self.num_id_vocabulary * torch.ones(boxes.shape[0], dtype=torch.int64, device=boxes.device)
         else:
@@ -129,6 +129,7 @@ class RuntimeTracker:
         boxes = boxes[keep_idxs]
         output_embeds = output_embeds[keep_idxs]
         pos = pos[keep_idxs]
+        kps = kps[keep_idxs]
         id_pred_labels = id_pred_labels[keep_idxs]
 
         # A hack implementation, before assign new id labels, update the id_queue to ensure the uniqueness of id labels:
@@ -156,6 +157,7 @@ class RuntimeTracker:
             boxes = boxes[keep_idxs]
             output_embeds = output_embeds[keep_idxs]
             pos = pos[keep_idxs]
+            kps = kps[keep_idxs]
             id_pred_labels = id_pred_labels[keep_idxs]
         pass
 
@@ -180,6 +182,10 @@ class RuntimeTracker:
                 [self.id_label_to_id[_] for _ in id_labels[confirmed_mask].tolist()], dtype=torch.int64,
             ),
         }
+        if kps.shape[-1] > 0:                  # detector with keypoints: (n, K, 3) = x, y (frame pixels), visibility probability
+            k = kps[confirmed_mask]
+            xy = k[..., :2] * self.bbox_unnorm[:2]
+            self.current_track_results["keypoints"] = torch.cat([xy, k[..., 2:]], dim=-1)
 
         # Update id_queue:
         for _ in range(len(id_labels)):
@@ -258,6 +264,10 @@ class RuntimeTracker:
         boxes = detr_out["pred_boxes"][0]
         output_embeds = detr_out["outputs"][0]
         pos = detr_out["pos_embeds"][0] if self.use_pos else output_embeds[:, :0]     # p_i (Spatial Anchor)
+        if "pred_keypoints" in detr_out:        # (Q, K, 3): normalised xy + visibility probability
+            kps = torch.cat([detr_out["pred_keypoints"][0], detr_out["pred_keypoint_vis"][0].sigmoid()[..., None]], dim=-1)
+        else:
+            kps = output_embeds.new_zeros((output_embeds.shape[0], 0, 3))
         scores = logits.sigmoid()
         scores, categories = torch.max(scores, dim=-1)
         area = boxes[:, 2] * self.bbox_unnorm[2] * boxes[:, 3] * self.bbox_unnorm[3]
@@ -267,9 +277,10 @@ class RuntimeTracker:
         boxes = boxes[activate_indices]
         output_embeds = output_embeds[activate_indices]
         pos = pos[activate_indices]
+        kps = kps[activate_indices]
         scores = scores[activate_indices]
         categories = categories[activate_indices]
-        return scores, categories, boxes, output_embeds, pos
+        return scores, categories, boxes, output_embeds, pos, kps
 
     def _get_id_pred_labels(self, boxes: torch.Tensor, output_embeds: torch.Tensor, pos: torch.Tensor = None):
         if self.trajectory_features.shape[0] == 0:

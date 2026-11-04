@@ -20,6 +20,8 @@ class NaiveSampler(Sampler):
             seed: int = 1025,
             data_weights: dict | None = None,
             samples_per_epoch: int | None = None,
+            dataset_mix: dict | None = None,
+            max_intervals: dict | None = None,
     ):
         super().__init__()
         self.data_source = data_source
@@ -31,6 +33,16 @@ class NaiveSampler(Sampler):
         self.seed = seed
         self.data_weights = data_weights
         self.samples_per_epoch = samples_per_epoch      # MOTIP2 App. A: 40k samples per epoch
+        # Multi-dataset training (both optional, keyed [dataset][split]):
+        #  dataset_mix:   target FRACTION of every epoch's samples drawn from each (dataset, split); needs
+        #                 samples_per_epoch. Without it samples are proportional to #legal clips (x integer weights).
+        #  max_intervals: per-dataset cap of the random frame interval (low-fps datasets must not skip frames).
+        self.dataset_mix = dataset_mix
+        self.max_intervals = max_intervals
+        if dataset_mix is not None:
+            assert samples_per_epoch is not None, "dataset_mix needs samples_per_epoch"
+            assert all(f >= 0 for d in dataset_mix.values() for f in d.values()) and \
+                sum(f for d in dataset_mix.values() for f in d.values()) > 0, "dataset_mix must be >= 0 and not all 0"
         # Check for these parameters:
         assert len(sample_steps) == len(sample_lengths) == len(sample_intervals), \
             "The lengths of sample_steps, sample_lengths, and sample_intervals should be the same."
@@ -57,6 +69,7 @@ class NaiveSampler(Sampler):
         random.seed(self.seed + epoch)      # only for sampling process.
         ############################################################
         sample_infos = []
+        pools = {}          # (dataset, split) -> indices into sample_infos
         sample_length: int | None = None
         sample_interval: int | None = None
         # First, calculate the sample length and interval:
@@ -78,7 +91,12 @@ class NaiveSampler(Sampler):
                 else:
                     _weight = 1
                 assert isinstance(_weight, int), f"The weight {_weight} should be an integer."
-                # TODO: Add support for float weights.
+                # (float weights: use `dataset_mix`, which is a sampling fraction, instead)
+                _cap = sample_interval
+                if self.max_intervals is not None and dataset in self.max_intervals \
+                        and split in self.max_intervals[dataset]:
+                    _cap = max(1, min(sample_interval, int(self.max_intervals[dataset][split])))
+                _pool = pools.setdefault((dataset, split), [])
                 # Sampling:
                 for sequence_name in self.data_source.annotations[dataset][split]:
                     for frame_id in range(self.data_source.sequence_infos[dataset][split][sequence_name]["length"]):
@@ -87,6 +105,7 @@ class NaiveSampler(Sampler):
                             if self.data_source.sequence_infos[dataset][split][sequence_name]["is_static"] is True:
                                 # static image
                                 if self.data_source.ann_is_legals[dataset][split][sequence_name][0]:
+                                    _pool.append(len(sample_infos))
                                     sample_infos.append({
                                         "dataset": dataset,
                                         "split": split,
@@ -101,13 +120,14 @@ class NaiveSampler(Sampler):
                                     remain_frames = self.data_source.sequence_infos[dataset][split][sequence_name]["length"] - begin_index - 1
                                     max_interval = floor(remain_frames / (sample_length - 1)) if sample_length > 1 \
                                         else 1
-                                    interval = min(random.randint(1, sample_interval), max_interval)
+                                    interval = min(random.randint(1, _cap), max_interval)
                                     frame_idxs = [begin_index + interval * _ for _ in range(sample_length)]
                                     _ = torch.tensor(frame_idxs, dtype=torch.int64)
                                     if self.data_source.ann_is_legals[dataset][split][sequence_name][_].all():
                                         # make sure in the sampling sequence,
                                         # all frame's annotation is legal,
                                         # which is friendly for training.
+                                        _pool.append(len(sample_infos))
                                         sample_infos.append({
                                             "dataset": dataset,
                                             "split": split,
@@ -125,7 +145,9 @@ class NaiveSampler(Sampler):
         g = torch.Generator()
         g.manual_seed(self.seed + epoch)
         indices = torch.randperm(kept_len, generator=g).tolist()
-        if self.samples_per_epoch is not None:
+        if self.dataset_mix is not None:
+            indices = self._mixed_indices(pools, g)
+        elif self.samples_per_epoch is not None:
             # MOTIP2: fixed epoch length; cycle through the (reshuffled-per-epoch) legal samples if too few.
             indices = (indices * (self.samples_per_epoch // max(1, len(indices)) + 1))[:self.samples_per_epoch]
         self.sample_infos = [sample_infos[_] for _ in indices]
@@ -134,6 +156,32 @@ class NaiveSampler(Sampler):
         random.setstate(general_random_state)
         ###########################
         return
+
+    def _mixed_indices(self, pools: dict, g: torch.Generator):
+        """samples_per_epoch indices with exactly round(fraction * samples_per_epoch) from every (dataset, split):
+        each pool is shuffled and cycled (a pool smaller than its quota is repeated, a larger one is subsampled)."""
+        def fraction(key):
+            d, sp = key
+            return self.dataset_mix.get(d, {}).get(sp, 0.0)
+        keys = [k for k in pools if fraction(k) > 0]
+        assert keys, "dataset_mix selects no dataset that has legal clips"
+        for k in pools:
+            if fraction(k) > 0:
+                assert len(pools[k]) > 0, f"dataset {k} has weight {fraction(k)} but no legal clip"
+        total = sum(fraction(k) for k in keys)
+        # largest-remainder rounding so the quotas sum exactly to samples_per_epoch
+        raw = {k: self.samples_per_epoch * fraction(k) / total for k in keys}
+        quota = {k: int(raw[k]) for k in keys}
+        for k in sorted(keys, key=lambda k: raw[k] - quota[k], reverse=True)[: self.samples_per_epoch - sum(quota.values())]:
+            quota[k] += 1
+        out = []
+        for k in keys:
+            pool = pools[k]
+            order = torch.randperm(len(pool), generator=g).tolist()
+            reps = quota[k] // len(pool) + 1
+            out += [pool[i] for i in (order * reps)[: quota[k]]]
+        perm = torch.randperm(len(out), generator=g).tolist()
+        return [out[i] for i in perm]
 
     def __iter__(self):
         return iter(self.sample_infos)

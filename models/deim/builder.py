@@ -69,7 +69,8 @@ def deim_num_layers(size: str) -> int:
 
 
 def build_deim(size: str, num_classes: int = 1, num_queries: int = 300, num_denoising: int = 100,
-               anchor_source: str = "layer_input", pretrained_backbone: bool = False):
+               anchor_source: str = "layer_input", pretrained_backbone: bool = False,
+               num_keypoints: int = 0, keypoint_hidden_layers: int = 4):
     from .wrapper import DEIMDetector
     cfg = deim_config(size)
     cfg["decoder"]["num_queries"] = num_queries
@@ -79,10 +80,15 @@ def build_deim(size: str, num_classes: int = 1, num_queries: int = 300, num_deno
     backbone = HGNetv2(pretrained=pretrained_backbone, **cfg["backbone"])
     encoder = HybridEncoder(eval_spatial_size=None, **cfg["encoder"])
     decoder = DFINETransformer(num_classes=num_classes, eval_spatial_size=None, **cfg["decoder"])
-    return DEIMDetector(backbone, encoder, decoder, anchor_source=anchor_source)
+    kp_head = None
+    if num_keypoints > 0:
+        from .keypoints import KeypointHead
+        kp_head = KeypointHead(cfg["decoder"]["hidden_dim"], num_keypoints, keypoint_hidden_layers)
+    return DEIMDetector(backbone, encoder, decoder, anchor_source=anchor_source, keypoint_head=kp_head)
 
 
-def build_detection_criterion(num_classes: int = 1):
+def build_detection_criterion(num_classes: int = 1, num_keypoints: int = 0, keypoint_loss_weights=(10.0, 3.0, 35.0),
+                              keypoint_sigmas=None, keypoint_labeled_values=(1, 2), keypoint_visible_values=(2,)):
     """DEIM losses exactly as Paper App. A: MAL 1.0, L1 5.0, GIoU 2.0, FGL 0.15, DDF 1.5; alpha 0.75, gamma 1.5;
     matcher costs class 2.0 / bbox 5.0 / giou 2.0."""
     from .wrapper import DetectionCriterion
@@ -92,4 +98,9 @@ def build_detection_criterion(num_classes: int = 1):
                          weight_dict=dict(loss_mal=1, loss_bbox=5, loss_giou=2, loss_fgl=0.15, loss_ddf=1.5),
                          losses=["mal", "boxes", "local"], alpha=0.75, gamma=1.5,
                          num_classes=num_classes, reg_max=32)
-    return DetectionCriterion(deim)
+    kp_loss = None
+    if num_keypoints > 0:
+        from .keypoints import KeypointLoss
+        kp_loss = KeypointLoss(num_keypoints, *keypoint_loss_weights, sigmas=keypoint_sigmas,
+                               labeled_values=keypoint_labeled_values, visible_values=keypoint_visible_values)
+    return DetectionCriterion(deim, keypoint_loss=kp_loss)

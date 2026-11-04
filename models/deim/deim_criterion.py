@@ -65,6 +65,21 @@ class DEIMCriterion(nn.Module):
         self.mal_alpha = mal_alpha
         self.use_uni_set = use_uni_set
 
+    @staticmethod
+    def _class_mask(targets, src_logits):
+        """MOTIP2 multi-dataset training: per-image mask [B, 1, C] of the classes the image's dataset ANNOTATES. Unannotated
+        classes get no classification loss (neither as positives nor as negatives), otherwise e.g. an unlabelled truck in a
+        dataset without a `truck` class would be trained as background. None when no target carries a mask."""
+        if not any("class_mask" in t for t in targets):
+            return None
+        C = src_logits.shape[-1]
+        first = next(t["class_mask"] for t in targets if "class_mask" in t)
+        m = torch.stack([t["class_mask"] if "class_mask" in t else torch.ones_like(first) for t in targets])
+        m = m.to(src_logits.device, src_logits.dtype)
+        if m.shape[-1] != C:                       # class-agnostic encoder head (C == 1): supervised iff any class is
+            m = m.amax(-1, keepdim=True)
+        return m[:, None, :]
+
     def loss_labels_focal(self, outputs, targets, indices, num_boxes):
         assert 'pred_logits' in outputs
         src_logits = outputs['pred_logits']
@@ -75,6 +90,9 @@ class DEIMCriterion(nn.Module):
         target_classes[idx] = target_classes_o
         target = F.one_hot(target_classes, num_classes=self.num_classes+1)[..., :-1]
         loss = torchvision.ops.sigmoid_focal_loss(src_logits, target, self.alpha, self.gamma, reduction='none')
+        cm = self._class_mask(targets, src_logits)
+        if cm is not None:
+            loss = loss * cm
         loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
 
         return {'loss_focal': loss}
@@ -105,6 +123,9 @@ class DEIMCriterion(nn.Module):
         weight = self.alpha * pred_score.pow(self.gamma) * (1 - target) + target_score
 
         loss = F.binary_cross_entropy_with_logits(src_logits, target_score, weight=weight, reduction='none')
+        cm = self._class_mask(targets, src_logits)
+        if cm is not None:
+            loss = loss * cm
         loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
         return {'loss_vfl': loss}
 
@@ -139,6 +160,9 @@ class DEIMCriterion(nn.Module):
 
         # print(" ### DEIM-gamma{}-alpha{} ### ".format(self.gamma, self.mal_alpha))
         loss = F.binary_cross_entropy_with_logits(src_logits, target_score, weight=weight, reduction='none')
+        cm = self._class_mask(targets, src_logits)
+        if cm is not None:
+            loss = loss * cm
         loss = loss.mean(1).sum() * src_logits.shape[1] / num_boxes
         return {'loss_mal': loss}
 

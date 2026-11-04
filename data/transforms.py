@@ -44,6 +44,37 @@ class MultiCompose:
         return images, annotations, metas
 
 
+# ---- per-detection keypoints (models/deim/keypoints.py) ------------------------------------------------------------
+# An annotation may carry `keypoints` (N, K, 2) in the current image's pixels (normalised by MultiNormalize*) and
+# `keypoints_vis` (N, K) = the GT visibility value (0 = not labelled). Every geometric transform below keeps them in step
+# with the boxes; points that leave the image get visibility 0 (unlabelled).
+def _kp_fields(annotation) -> list:
+    return [f for f in ("keypoints", "keypoints_vis") if f in annotation]
+
+
+def _kp_affine(annotation, scale=(1.0, 1.0), shift=(0.0, 0.0)):
+    if "keypoints" in annotation:
+        annotation["keypoints"] = annotation["keypoints"] * torch.as_tensor(scale, dtype=torch.float32) \
+            + torch.as_tensor(shift, dtype=torch.float32)
+
+
+def _kp_mask_outside(annotation, width, height):
+    if "keypoints" in annotation:
+        k = annotation["keypoints"]
+        out = (k[..., 0] < 0) | (k[..., 0] > width) | (k[..., 1] < 0) | (k[..., 1] > height)
+        annotation["keypoints_vis"] = annotation["keypoints_vis"].masked_fill(out, 0)
+
+
+def flip_pair_permutation(num_keypoints: int, flip_pairs) -> list:
+    """flip_pairs: [[i, j], ...] or a flat list [i, j, i, j, ...] of left/right keypoint indices."""
+    if flip_pairs and not isinstance(flip_pairs[0], (list, tuple)):
+        flip_pairs = [flip_pairs[i:i + 2] for i in range(0, len(flip_pairs), 2)]
+    perm = list(range(num_keypoints))
+    for i, j in flip_pairs or []:
+        perm[i], perm[j] = j, i
+    return perm
+
+
 class MultiSimulate:
     """
     Simulate a video clip from a sequence of images.
@@ -79,6 +110,8 @@ class MultiSimulate:
                 # Crop:
                 _i, _j, _h, _w = y_min, x_min, y_max - y_min, x_max - x_min
                 _ann["bbox"] = _ann["bbox"] - torch.tensor([_j, _i, _j, _i])
+                _kp_affine(_ann, shift=(-_j, -_i))
+                _kp_mask_outside(_ann, _w, _h)
                 _bbox = _ann["bbox"].clone()
                 _max_wh = torch.tensor([_w, _h])
                 _bbox = torch.min(_bbox.reshape(-1, 2, 2), _max_wh)
@@ -86,7 +119,7 @@ class MultiSimulate:
                 _legal_idxs = torch.all(_bbox[:, 1, :] > _bbox[:, 0, :], dim=1)
                 # Reshape to the original format:
                 _bbox = _bbox.reshape(-1, 4)
-                _need_to_select_fields = ["bbox", "category", "id", "visibility"]
+                _need_to_select_fields = ["bbox", "category", "id", "visibility"] + _kp_fields(_ann)
                 if self.overflow_bbox is False:
                     _ann["bbox"] = _bbox
                 for _field in _need_to_select_fields:
@@ -98,6 +131,7 @@ class MultiSimulate:
                 _w_ratio = w / _w
                 _bbox_ratio = torch.tensor([_w_ratio, _h_ratio] * 2)
                 _ann["bbox"] = _ann["bbox"] * _bbox_ratio
+                _kp_affine(_ann, scale=(_w_ratio, _h_ratio))
                 _image = v2.functional.resize(_image, [h, w])
                 # Put into the shifted sequence:
                 shifted_images.append(_image)
@@ -158,8 +192,9 @@ class MultiBoxXYXYtoCXCYWH:
 
 
 class MultiRandomHorizontalFlip:
-    def __init__(self, p=0.5):
+    def __init__(self, p=0.5, keypoint_flip_pairs=None):
         self.p = p
+        self.keypoint_flip_pairs = keypoint_flip_pairs
 
     def __call__(self, images, annotations, metas):
         # Here, the boxes in annotations are in the format of (x1, y1, x2, y2).
@@ -178,6 +213,14 @@ class MultiRandomHorizontalFlip:
                     * torch.as_tensor([-1, 1, -1, 1])
                     + torch.as_tensor([w, 0, w, 0])
                 )
+                if "keypoints" in annotation:
+                    if not self.keypoint_flip_pairs:
+                        raise ValueError("Horizontal flip with keypoints needs KEYPOINT_FLIP_PAIRS "
+                                         "(otherwise left/right keypoints would be mislabelled).")
+                    perm = flip_pair_permutation(annotation["keypoints"].shape[1], self.keypoint_flip_pairs)
+                    annotation["keypoints"] = annotation["keypoints"][:, perm] * torch.as_tensor([-1.0, 1.0]) \
+                        + torch.as_tensor([float(w), 0.0])
+                    annotation["keypoints_vis"] = annotation["keypoints_vis"][:, perm]
         return images, annotations, metas
 
 
@@ -231,6 +274,7 @@ class MultiRandomResize:
         # Resize annotations:
         for annotation in annotations:
             annotation["bbox"] = annotation["bbox"] * torch.as_tensor([scale_ratio_x, scale_ratio_y] * 2)
+            _kp_affine(annotation, scale=(scale_ratio_x, scale_ratio_y))
         return images, annotations, metas
 
 
@@ -252,6 +296,8 @@ class MultiRandomCrop:
         _i, _j, _h, _w = crop_ijhw
         for _annotation in _annotations:
             _annotation["bbox"] = _annotation["bbox"] - torch.tensor([_j, _i, _j, _i])  # (x1,y1,x2,y2) - (j,i,j,i)
+            _kp_affine(_annotation, shift=(-_j, -_i))
+            _kp_mask_outside(_annotation, _w, _h)
             _bbox = _annotation["bbox"].clone()
             _max_wh = torch.tensor([_w, _h])
             # If the crop box is out of the image, we need to adjust the bbox:
@@ -266,7 +312,7 @@ class MultiRandomCrop:
             )
             # Reshape to the original format:
             _bbox = _bbox.reshape(-1, 4)
-            _need_to_select_fields = ["bbox", "category", "id", "visibility"]
+            _need_to_select_fields = ["bbox", "category", "id", "visibility"] + _kp_fields(_annotation)
             if self.overflow_bbox is False:
                 _annotation["bbox"] = _bbox
             for _field in _need_to_select_fields:
@@ -312,6 +358,7 @@ class MultiRandomZoomOut:
         shift = torch.as_tensor([left, top, left, top], dtype=torch.float32)
         for annotation in annotations:
             annotation["bbox"] = annotation["bbox"] + shift
+            _kp_affine(annotation, shift=(left, top))
         return new_images, annotations, metas
 
 
@@ -338,8 +385,11 @@ class MultiRandomIoUCrop:
         ok = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
         keep_idx = torch.nonzero(keep)[:, 0][ok]
         a["bbox"] = boxes[ok]
-        for f in ["category", "id", "visibility"]:
+        for f in ["category", "id", "visibility"] + _kp_fields(annotation):
             a[f] = annotation[f][keep_idx]
+        if "keypoints" in a:
+            _kp_affine(a, shift=(-left, -top))
+            _kp_mask_outside(a, cw, ch)
         a["is_legal"] = is_legal(a)
         return a
 
@@ -445,6 +495,7 @@ class MultiNormalize:
         h, w = images.shape[-2:]
         for annotation in annotations:
             annotation["bbox"] = annotation["bbox"] / torch.tensor([w, h, w, h])
+            _kp_affine(annotation, scale=(1.0 / w, 1.0 / h))
         return images.contiguous(), annotations, metas
 
 
@@ -458,6 +509,7 @@ class MultiNormalizeBoundingBoxes:
         h, w = images.shape[-2:]
         for annotation in annotations:
             annotation["bbox"] = annotation["bbox"] / torch.tensor([w, h, w, h])
+            _kp_affine(annotation, scale=(1.0 / w, 1.0 / h))
         return images.contiguous(), annotations, metas
 
 
@@ -692,7 +744,7 @@ def build_transforms(config: dict):
         MultiBoxXYWHtoXYXY(),
         MultiSimulate(max_shift_ratio=config["AUG_MAX_SHIFT_RATIO"], overflow_bbox=config["AUG_OVERFLOW_BBOX"]),
         MultiStack(),
-        MultiRandomHorizontalFlip(p=0.5),
+        MultiRandomHorizontalFlip(p=0.5, keypoint_flip_pairs=config.get("KEYPOINT_FLIP_PAIRS")),
         MultiRandomSelect(
             MultiRandomResize(sizes=config["AUG_RESIZE_SCALES"], max_size=config["AUG_MAX_SIZE"]),
             MultiCompose([
@@ -731,6 +783,16 @@ def build_transforms(config: dict):
     ])
 
 
+def _flip_transforms(config: dict) -> list:
+    """Horizontal flip; with keypoints it needs the left/right pairs, otherwise it is left out (a flip without the
+    pairs would swap the meaning of left/right keypoints)."""
+    if int(config.get("NUM_KEYPOINTS", 0) or 0) > 0 and not config.get("KEYPOINT_FLIP_PAIRS"):
+        import warnings
+        warnings.warn("NUM_KEYPOINTS > 0 and KEYPOINT_FLIP_PAIRS is not set: horizontal-flip augmentation is DISABLED")
+        return []
+    return [MultiRandomHorizontalFlip(p=0.5, keypoint_flip_pairs=config.get("KEYPOINT_FLIP_PAIRS"))]
+
+
 def _build_motip2_transforms(config: dict):
     """MOTIP2 Paper App. A image pipeline (multi-scale is applied per batch, see data/util.py:batch_multiscale):
     flip p=0.5 -> zoom-out p=0.5 [1,2] -> IoU-crop p=0.8 [0.3,1] aspect [1.5,2] -> resize to base (shorter
@@ -740,7 +802,7 @@ def _build_motip2_transforms(config: dict):
         MultiBoxXYWHtoXYXY(),
         MultiSimulate(max_shift_ratio=config["AUG_MAX_SHIFT_RATIO"], overflow_bbox=config["AUG_OVERFLOW_BBOX"]),
         MultiStack(),
-        MultiRandomHorizontalFlip(p=0.5),
+        *_flip_transforms(config),
         MultiRandomZoomOut(p=0.5, scale_range=(1.0, 2.0)),
         MultiRandomIoUCrop(p=0.8, min_scale=0.3, max_scale=1.0, min_aspect_ratio=1.5, max_aspect_ratio=2.0),
         MultiRandomResize(sizes=[config["AUG_BASE_SIZE"]], max_size=config["AUG_MAX_SIZE"]),

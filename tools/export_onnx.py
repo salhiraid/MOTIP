@@ -7,6 +7,7 @@ engines (see models/runtime_tracker.py).
         --out-dir export/s --height 800 --width 1440 --verify
 
 * detector.onnx   x (1,3,H,W) float32 in [0,1] RGB  ->  logits (1,Q,C), boxes (1,Q,4 cxcywh normalised), emb (1,Q,D), pos (1,Q,D)
+                  [+ kpts (1,Q,K,2) normalised xy inside each box, kpt_vis (1,Q,K) visibility LOGITS when NUM_KEYPOINTS > 0]
                   FIXED resolution H x W (anchors/positional grids depend on it; pad the frame to it like the tracker does).
 * id_decoder.onnx tracks T x N, detections M with DYNAMIC T, N, M (ONNX dynamic axes, verified at several shapes) ->
                   logits (M, K+1).  RoPE alpha (ROPE_ALPHA / ROPE_ALPHA_MODE) is baked in as an inference constant.
@@ -39,10 +40,22 @@ class DetectorExport(nn.Module):
     def __init__(self, detr):
         super().__init__()
         self.detr = detr
+        self.with_keypoints = getattr(detr, "keypoint_head", None) is not None
 
     def forward(self, x):
         o = self.detr(x)
-        return o["pred_logits"], o["pred_boxes"], o["outputs"], o["pos_embeds"]
+        out = (o["pred_logits"], o["pred_boxes"], o["outputs"], o["pos_embeds"])
+        if self.with_keypoints:
+            out += (o["pred_keypoints"], o["pred_keypoint_vis"])
+        return out
+
+
+DETECTOR_OUTPUT_NAMES = ["logits", "boxes", "emb", "pos"]
+KEYPOINT_OUTPUT_NAMES = ["kpts", "kpt_vis"]
+
+
+def detector_output_names(wrap):
+    return DETECTOR_OUTPUT_NAMES + (KEYPOINT_OUTPUT_NAMES if wrap.with_keypoints else [])
 
 
 class IDDecoderExport(nn.Module):
@@ -109,7 +122,7 @@ def export_id_decoder(motip, cfg, path, max_context=64, max_tracks=300, max_dets
 def export_detector(motip, path, height, width, opset=18):
     wrap = DetectorExport(motip.detr).eval()
     x = torch.rand(1, 3, height, width)
-    prog = torch.onnx.export(wrap, (x,), dynamo=True, input_names=["x"], output_names=["logits", "boxes", "emb", "pos"],
+    prog = torch.onnx.export(wrap, (x,), dynamo=True, input_names=["x"], output_names=detector_output_names(wrap),
                              opset_version=opset)
     prog.save(path)
     return wrap
@@ -145,9 +158,21 @@ def verify_detector(wrap, path, height, width, n_inputs=2, box_tol=1e-3):
         found = float((d.min(1) < box_tol).mean())
         worst_found = min(worst_found, found)
         ok = d.min(1) < box_tol
-        for k in (0, 2, 3):                                                 # logits, embeddings, positional encodings
+        for k in [0, 2, 3] + list(range(4, len(ref))):                      # logits, embeddings, positional enc., keypoints
             worst_other = max(worst_other, float(np.abs(out[k][ok] - ref[k][j[ok]]).max()))
     return worst_found, worst_other
+
+
+def onnx_opset(path):
+    """The opset the file REALLY declares (the dynamo exporter may emit a higher one than requested)."""
+    import onnx
+    return max(o.version for o in onnx.load(path, load_external_data=False).opset_import if o.domain in ("", "ai.onnx"))
+
+
+def onnx_ops(path):
+    """Operator types used by the graph (check them against your TensorRT version's supported-operator list)."""
+    import onnx
+    return sorted({n.op_type for n in onnx.load(path, load_external_data=False).graph.node})
 
 
 def main(argv=None):
@@ -162,11 +187,14 @@ def main(argv=None):
     ap.add_argument("--max-tracks", type=int, default=300)
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--only", choices=["detector", "id_decoder"], default=None)
+    ap.add_argument("--num-keypoints", type=int, default=None, help="override NUM_KEYPOINTS of the config (must match the checkpoint)")
     a = ap.parse_args(argv)
 
     cfg = yaml_to_dict(a.config)
     cfg = load_super_config(cfg, cfg.get("SUPER_CONFIG_PATH"))
     cfg["ONLY_DETR"] = False
+    if a.num_keypoints is not None:
+        cfg["NUM_KEYPOINTS"] = a.num_keypoints
     motip, _ = build_motip(cfg)
     if a.ckpt:
         load_checkpoint(motip, path=a.ckpt)
@@ -184,9 +212,15 @@ def main(argv=None):
     if a.only != "id_decoder":
         p = os.path.join(a.out_dir, "detector.onnx")
         wrap = export_detector(motip, p, a.height, a.width, a.opset)
-        meta["detector"] = {"file": "detector.onnx", "inputs": ["x"], "outputs": ["logits", "boxes", "emb", "pos"],
-                            "hidden_dim": motip.detr.hidden_dim}
-        print(f"wrote {p}")
+        meta["detector"] = {"file": "detector.onnx", "inputs": ["x"], "outputs": detector_output_names(wrap),
+                            "hidden_dim": motip.detr.hidden_dim, "num_keypoints": int(cfg.get("NUM_KEYPOINTS", 0) or 0),
+                            "onnx_ops": onnx_ops(p), "preprocessing": "RGB, float32, x/255 in [0,1], NO mean/std normalisation; "
+                            "resize/pad the frame to (H, W) = detector_resolution_HW"}
+        meta["detector"]["opset_in_file"] = onnx_opset(p)
+        print(f"wrote {p}  (opset {meta['detector']['opset_in_file']})")
+        if meta["detector"]["opset_in_file"] != a.opset:
+            print(f"  NOTE: requested opset {a.opset} but the file declares {meta['detector']['opset_in_file']}: the PyTorch dynamo "
+                  f"exporter raises the opset when an operator needs it. Check that your TensorRT parser supports it.")
         if a.verify:
             found, diff = verify_detector(wrap, p, a.height, a.width)
             report["detector"] = {"boxes_found": found, "max_diff_matched": diff}
@@ -198,6 +232,7 @@ def main(argv=None):
         p = os.path.join(a.out_dir, "id_decoder.onnx")
         wrap, names, use_pos, D, K = export_id_decoder(motip, cfg, p, a.max_context, a.max_tracks, a.max_tracks, a.opset)
         meta["id_decoder"] = {"file": "id_decoder.onnx", "inputs": names, "outputs": ["logits"], "dim": D, "K": K,
+                              "onnx_ops": onnx_ops(p), "opset_in_file": onnx_opset(p),
                               "spatial_anchor": use_pos, "dynamic_axes": {"T": [2, a.max_context], "N": [1, a.max_tracks],
                                                                          "M": [1, a.max_tracks]}}
         print(f"wrote {p}")

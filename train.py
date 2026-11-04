@@ -78,6 +78,13 @@ def train_engine(config: dict):
         data_weights = dict(data_weights)
     else:
         data_weights = None
+    def _per_dataset(values):
+        out = defaultdict(dict)
+        for _i, _v in enumerate(values):
+            out[config["DATASETS"][_i]][config["DATASET_SPLITS"][_i]] = _v
+        return dict(out)
+    dataset_mix = _per_dataset(config["DATASET_MIX"]) if config.get("DATASET_MIX") else None
+    max_intervals = _per_dataset(config["DATASET_MAX_INTERVALS"]) if config.get("DATASET_MAX_INTERVALS") else None
     train_sampler = NaiveSampler(
         data_source=train_dataset,
         sample_steps=config["SAMPLE_STEPS"],
@@ -86,6 +93,8 @@ def train_engine(config: dict):
         length_per_iteration=config["LENGTH_PER_ITERATION"],
         data_weights=data_weights,
         samples_per_epoch=config.get("SAMPLES_PER_EPOCH", None),
+        dataset_mix=dataset_mix,
+        max_intervals=max_intervals,
     )
     # Build training data loader:
     train_dataloader = DataLoader(
@@ -731,6 +740,9 @@ def deim_detr_forward(model, detr_criterion, images, annotations, device, num_tr
     flat = lambda ts: [b * _T + t for b in range(_B) for t in ts]
     train_flat, ng_flat = flat(train_t), flat(ng_t)
     targets_all = annotations_to_flatten_detr_targets(annotations=annotations, device=device)
+    _H, _W = images.tensors.shape[-2:]
+    for _t in targets_all:                      # pixel size of the (batch-scaled) frames: needed by the keypoint OKS loss
+        _t["size_wh"] = torch.tensor([_W, _H], dtype=torch.float32, device=device)
     x = einops.rearrange(images.tensors, "b t c h w -> (b t) c h w")
     m = einops.rearrange(images.mask, "b t h w -> (b t) h w")
 
@@ -770,12 +782,16 @@ def annotations_to_flatten_detr_targets(annotations: list, device):
     targets = []
     for annotation in annotations:      # scan by batch
         for ann in annotation:          # scan by frame
-            targets.append(
-                {
-                    "boxes": ann["bbox"].to(device),
-                    "labels": ann["category"].to(device),
-                }
-            )
+            target = {
+                "boxes": ann["bbox"].to(device),
+                "labels": ann["category"].to(device),
+            }
+            if "class_mask" in ann:         # multi-dataset training: classes this frame's dataset annotates
+                target["class_mask"] = ann["class_mask"].to(device)
+            if "keypoints" in ann:          # normalised xy (N,K,2) and GT visibility values (N,K); v=0 = not labelled
+                target["keypoints"] = ann["keypoints"].to(device)
+                target["keypoints_vis"] = ann["keypoints_vis"].to(device)
+            targets.append(target)
     return targets
 
 
