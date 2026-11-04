@@ -17,11 +17,20 @@ class OnnxMOTIP(nn.Module):
     def __init__(self, export_dir, providers=("CPUExecutionProvider",)):
         super().__init__()
         self.meta = json.load(open(os.path.join(export_dir, "export_meta.json")))
-        self.det = ort.InferenceSession(os.path.join(export_dir, self.meta["detector"]["file"]), providers=list(providers))
-        self.dec = ort.InferenceSession(os.path.join(export_dir, self.meta["id_decoder"]["file"]), providers=list(providers))
-        idm = self.meta["id_decoder"]
+        self.single = "single" in self.meta                    # ONE motip2.onnx (detector + ID decoder) instead of two graphs
+        if self.single:
+            idm = self.meta["single"]
+            self.net = ort.InferenceSession(os.path.join(export_dir, idm["file"]), providers=list(providers))
+            self.det = self.dec = None
+            self.tracker, self._cache = None, None
+            hidden = idm["dim"]
+        else:
+            self.det = ort.InferenceSession(os.path.join(export_dir, self.meta["detector"]["file"]), providers=list(providers))
+            self.dec = ort.InferenceSession(os.path.join(export_dir, self.meta["id_decoder"]["file"]), providers=list(providers))
+            idm = self.meta["id_decoder"]
+            hidden = self.meta["detector"]["hidden_dim"]
         # the attributes RuntimeTracker reads from the model
-        self.detr = SimpleNamespace(hidden_dim=self.meta["detector"]["hidden_dim"])
+        self.detr = SimpleNamespace(hidden_dim=hidden)
         self.id_decoder = SimpleNamespace(spatial_anchor=idm["spatial_anchor"], set_rope_alpha=lambda *a, **k: None)
         self.num_id_vocabulary = idm["K"]
         self._names = idm["inputs"]
@@ -31,7 +40,45 @@ class OnnxMOTIP(nn.Module):
     def _np(t):
         return t.detach().cpu().numpy()
 
+    def attach(self, tracker):
+        """Single-graph mode: the detector call also needs the tracker's trajectory buffer (it is the same graph)."""
+        self.tracker = tracker
+
+    def _single_detr(self, x):
+        tr = self.tracker
+        assert tr is not None, "single-graph export: call model.attach(tracker) after building the RuntimeTracker"
+        have = tr.trajectory_features.shape[0] > 0 and tr.trajectory_features.shape[1] > 0
+        D = self.detr.hidden_dim
+        if have:
+            buf = {"traj_feat": tr.trajectory_features, "traj_pos": tr.trajectory_pos, "traj_ids": tr.trajectory_id_labels,
+                   "traj_times": tr.trajectory_times, "traj_masks": tr.trajectory_masks}
+        else:                                                   # first frame: dummy fully-masked buffer, id_logits are ignored
+            buf = {"traj_feat": torch.zeros(2, 1, D), "traj_pos": torch.zeros(2, 1, D), "traj_ids": torch.zeros(2, 1, dtype=torch.long),
+                   "traj_times": torch.arange(2)[:, None].long(), "traj_masks": torch.ones(2, 1, dtype=torch.bool)}
+        feed = {"x": x, "det_thresh": np.array([tr.det_thresh], np.float32)}
+        for n in self._names:
+            if n in buf:
+                v = self._np(buf[n])
+                feed[n] = v.astype(np.int64) if n in ("traj_ids", "traj_times") else v
+        feed = {n: feed[n] for n in self._names}
+        return self.net.run(None, feed)
+
     def forward(self, frames=None, part=None, seq_info=None, **kw):
+        if part == "detr" and self.single:
+            x = self._np(frames.tensors if hasattr(frames, "tensors") else frames).astype(np.float32)
+            assert tuple(x.shape[-2:]) == self.expected_hw, f"exported for {self.expected_hw}, got {x.shape[-2:]}"
+            outs = self._single_detr(x)
+            res = {"pred_logits": torch.from_numpy(outs[0]), "pred_boxes": torch.from_numpy(outs[1]),
+                   "outputs": torch.from_numpy(outs[2]), "pos_embeds": torch.from_numpy(outs[3])}
+            if len(outs) == 7:
+                res["pred_keypoints"], res["pred_keypoint_vis"] = torch.from_numpy(outs[4]), torch.from_numpy(outs[5])
+            self._cache = (res["outputs"][0], torch.from_numpy(outs[-1]))
+            return res
+        if part == "id_decoder" and self.single:
+            uf = seq_info["unknown_features"][0, 0, 0]
+            emb, logits = self._cache
+            idx = (emb[None] == uf[:, None]).all(-1).float().argmax(-1)      # rows of the selected detections in the 300 queries
+            return logits[idx][None, None, None], None, None
         if part == "detr":
             x = self._np(frames.tensors if hasattr(frames, "tensors") else frames).astype(np.float32)
             assert tuple(x.shape[-2:]) == self.expected_hw, f"detector was exported for {self.expected_hw}, got {x.shape[-2:]}"

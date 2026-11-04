@@ -189,3 +189,101 @@ def test_keypoints_through_the_onnx_graphs_inside_the_real_tracker(tmp_path):
     allk = torch.stack([k for r in got for k in r.values()])
     assert allk[..., 0].min() >= 0 and allk[..., 0].max() <= 2 * W and allk[..., 1].max() <= 2 * H
     assert allk[..., 2].min() >= 0 and allk[..., 2].max() <= 1
+
+
+# ---- ONE graph (motip2.onnx = detector + trajectory adapter + ID decoder) ----------------------------------------------
+@pytest.fixture(scope="module")
+def exported_single(tmp_path_factory):
+    d = tmp_path_factory.mktemp("onnx_single")
+    cfg = small_cfg(NUM_KEYPOINTS=4)
+    torch.manual_seed(0)
+    motip, _ = build_motip(cfg)
+    for p in motip.parameters():
+        if p.requires_grad and p.dim() > 1:
+            torch.nn.init.normal_(p, std=0.05)
+    ck = d / "m.pth"
+    torch.save({"model": motip.state_dict()}, ck)
+    (d / "cfg.yaml").write_text(yaml.safe_dump(cfg))
+    assert E.main(["--config", str(d / "cfg.yaml"), "--ckpt", str(ck), "--out-dir", str(d / "ex"), "--height", str(H), "--width", str(W),
+                   "--format", "single", "--verify"]) == 0
+    return cfg, ck, d / "ex"
+
+
+def test_single_graph_files_metadata_and_parity(exported_single):
+    cfg, ck, out = exported_single
+    meta = json.load(open(out / "export_meta.json"))
+    assert (out / "motip2.onnx").exists() and not (out / "detector.onnx").exists() and not (out / "id_decoder.onnx").exists()
+    s = meta["single"]
+    assert s["inputs"][:2] == ["x", "det_thresh"] and s["outputs"] == ["logits", "boxes", "emb", "pos", "kpts", "kpt_vis", "id_logits"]
+    assert meta["verification"]["single"]["max_diff_id_logits_vs_two_graph_pipeline"] < 1e-3
+    assert meta["verification"]["single"]["max_diff_detector_outputs"] < 1e-3 and meta["verification"]["single"]["boxes_found"] >= 0.95
+
+
+def test_single_graph_equals_the_two_graph_pipeline_for_the_selected_detections_only(exported_single, tmp_path):
+    """Masking trick: unselected queries are key-padded in the ID decoder's self-attention, so the selected rows equal what the
+    ID decoder returns when it only sees the selected detections. Different thresholds select different sets."""
+    import onnxruntime as ort
+    cfg, ck, out = exported_single
+    sess = ort.InferenceSession(str(out / "motip2.onnx"), providers=["CPUExecutionProvider"])
+    names = [i.name for i in sess.get_inputs()]
+    on = [o.name for o in sess.get_outputs()]
+    D, K = cfg["FEATURE_DIM"], cfg["NUM_ID_VOCABULARY"]
+    torch.manual_seed(5)
+    x = torch.rand(1, 3, H, W).numpy()
+    traj = E.id_decoder_inputs(7, 5, 1, D, K, True, seed=3)[:5]
+    base = {"x": x, **{n: t.numpy() for n, t in zip(names[2:], traj)}}
+    s0 = sess.run(None, {**base, "det_thresh": np.array([2.0], np.float32)})[0][0]
+    scores = torch.from_numpy(s0).sigmoid().max(-1)[0].sort(descending=True)[0]
+    results = {}
+    for n_sel in (2, 9):
+        thr = float((scores[n_sel - 1] + scores[n_sel]) / 2) if float(scores[n_sel - 1] - scores[n_sel]) > 1e-6 else None
+        if thr is None:
+            continue
+        o = dict(zip(on, sess.run(None, {**base, "det_thresh": np.array([thr], np.float32)})))
+        sel = (torch.from_numpy(o["logits"][0]).sigmoid().max(-1)[0] > thr).nonzero()[:, 0]
+        assert len(sel) == n_sel
+        results[n_sel] = (sel, o["id_logits"][sel.numpy()])
+        tm, _ = build_motip(cfg)
+        from models.misc import load_checkpoint
+        load_checkpoint(tm, path=str(ck)); tm.eval(); tm.id_decoder.set_rope_alpha(cfg["ROPE_ALPHA"], cfg["ROPE_ALPHA_MODE"])
+        idw = E.IDDecoderExport(tm, True).eval()
+        emb, pos = torch.from_numpy(o["emb"][0])[sel], torch.from_numpy(o["pos"][0])[sel]
+        with torch.no_grad():
+            sep = idw(*traj, emb, pos, torch.zeros(n_sel, dtype=torch.bool), torch.full((n_sel,), 7))
+        assert np.abs(o["id_logits"][sel.numpy()] - sep.numpy()).max() < 1e-3
+        # control: with every query selected (threshold -1) the same rows are DIFFERENT -> the mask is what makes them equal
+        every = sess.run(None, {**base, "det_thresh": np.array([-1.0], np.float32)})[-1]
+        assert np.abs(every[sel.numpy()] - sep.numpy()).max() > 1e-3
+    assert len(results) >= 1
+
+
+def test_single_graph_inside_the_real_tracker_matches_pytorch(exported_single):
+    cfg, ck, out = exported_single
+    from models.misc import load_checkpoint
+    tm, _ = build_motip(cfg)
+    load_checkpoint(tm, path=str(ck)); tm.eval()
+    torch.manual_seed(1)
+    frames = [torch.rand(1, 3, H, W) for _ in range(8)]
+    with torch.no_grad():
+        sc = tm(frames=NestedTensor(frames[0], torch.zeros(1, H, W, dtype=torch.bool)), part="detr")["pred_logits"].sigmoid().max(-1)[0][0]
+    s = sc.sort(descending=True)[0]
+    i = max(range(2, 12), key=lambda k: float(s[k - 1] - s[k]))             # a threshold inside a large score gap (no ties)
+    thr = float((s[i - 1] + s[i]) / 2)
+
+    def run(model):
+        tr = RuntimeTracker(model=model, sequence_hw=(H, W), assignment_protocol="object-max", miss_tolerance=10,
+                            det_thresh=thr, newborn_thresh=thr, id_thresh=0.1, n_init=1, rope_alpha=cfg["ROPE_ALPHA"],
+                            rope_alpha_mode=cfg["ROPE_ALPHA_MODE"])
+        if hasattr(model, "attach"):
+            model.attach(tr)
+        res = []
+        for f in frames:
+            tr.update(image=NestedTensor(f, torch.zeros(1, H, W, dtype=torch.bool)))
+            r = tr.get_track_results()
+            res.append({int(i_): [float(x) for x in b] for i_, b in zip(r["id"], r["bbox"])})
+        return res
+    ref, got = run(tm), run(OnnxMOTIP(str(out)))
+    assert OnnxMOTIP(str(out)).single is True
+    assert sum(len(r) for r in ref) > 15
+    assert [len(r) for r in ref] == [len(r) for r in got]
+    assert _same_partition(ref, got)

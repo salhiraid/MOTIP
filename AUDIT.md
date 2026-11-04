@@ -8,7 +8,7 @@ implemented and **which test proves it**. "Proves" is graded honestly:
 * **WIRING** — the flag/number reaches the module (a config or plumbing check). Necessary, not sufficient.
 * **NOT VERIFIED** — needs real data, a GPU or TensorRT; nothing here claims it works.
 
-Run everything: `python -m pytest tests -q` (232 tests, ~11 min on 4 CPU cores). `-m "not slow"` skips the detector-overfit and end-to-end/DDP tests (~5 min saved).
+Run everything: `python -m pytest tests -q` (see the count at the end of the run, ~11 min on 4 CPU cores). `-m "not slow"` skips the detector-overfit and end-to-end/DDP tests (~5 min saved).
 
 ## A. Requirements → code → proof
 
@@ -44,7 +44,7 @@ Run everything: `python -m pytest tests -q` (232 tests, ~11 min on 4 CPU cores).
 | 28 | Resume with EMA state | `train.py`, `models/misc.py` | epoch/step/EMA-update counters verified across a resume |
 | 29 | Evaluation pipeline reproduces MOTIP (Gate 1, 64.0 HOTA) | `submit_and_evaluate.py` | **NOT VERIFIED** (needs GPU, data, checkpoint) |
 | 34 | Per-detection keypoints (bbox-anchored head, L1/BCE/OKS on the matched query), data, augmentation, converter, tracker output | `models/deim/keypoints.py`, `wrapper.py`, `data/*`, `tools/vehicles/convert_mmdet_deim.py`, `runtime_tracker.py` | EXACT decoding inside the box, analytic OKS, label semantics independent of the batch, exact mmdet-branch tensor mapping, augmentation geometry; BEHAVIOUR head learns (control does not); CPU train + track end to end. **Accuracy on real keypoint data NOT measured** |
-| 35 | ONNX of S and M with the keypoint head for Orin/TensorRT | `tools/export_onnx.py`, `tools/export_orin.sh` | EXACT parity vs PyTorch (S, M, 31 keypoints) and inside the real tracker (boxes + keypoints). **TensorRT FP16/INT8 NOT built** (docs/DEPLOY_ORIN.md) |
+| 35 | ONNX of S and M with the keypoint head for Orin/TensorRT; ONE graph (detector + ID decoder) via `--format single` | `tools/export_onnx.py`, `tools/export_orin.sh` | EXACT parity vs PyTorch (S, M, 31 keypoints) and inside the real tracker (boxes + keypoints); single graph: selected `id_logits` == two-graph pipeline (3e-6, control without the key-padding mask differs), identical tracks inside the real tracker. **TensorRT FP16/INT8 NOT built** (docs/DEPLOY_ORIN.md) |
 | 30 | Paper numbers (Tab. 1–10) | — | **NOT VERIFIED**: no run on real benchmarks exists |
 | 31 | Train on one or several tracking datasets (BDD100K, UA-DETRAC, VisDrone, UAVDT, FastTracker, CityFlow, KITTI, Waymo, nuScenes, AV2, 3D-box data) | `data/converters/*`, `data/unified_mot.py`, `data/class_maps.py` | EXACT each converter on a tiny dataset in the dataset's *native format* (boxes, classes, ids, splits, distractors/ignore, jpeg-resize rescaling); EXACT 3D projections vs an independent corner projection (translated/yawed ego, AV2 ego-motion); mutation-checked (dropping ego-motion, ego translation, near-plane clipping makes tests fail). **Real downloads NOT tested** (docs/DATASETS.md §8) |
 | 32 | Exact dataset shares per epoch, per-dataset frame-interval cap | `data/naive_sampler.py` | EXACT shares (largest remainder), determinism, cycling, caps; default sampling bit-identical without the options |
