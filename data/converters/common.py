@@ -41,6 +41,8 @@ class Sequence:
     width: int = 0
     height: int = 0
     meta: dict = field(default_factory=dict)
+    keypoints: list = field(default_factory=list)   # [(frame, track_id, [x, y, v, x, y, v, ...])]  source pixels, v = GT visibility value
+    static: bool = False                            # independent still image (seqinfo isStatic=1): sampled as a 1-frame "clip"
 
 
 class IdMap:
@@ -157,6 +159,18 @@ def build_output_rows(seq: Sequence, scale, out_wh, min_box):
         x, y, w, h = _clip(x * sx, y * sy, w * sx, h * sy, W, H)
         if w >= min_box and h >= min_box:
             drows.append((fr, tid, x, y, w, h))
+    kept = {(r[0], r[1]) for r in rows}
+    krows = []
+    for fr, tid, flat in seq.keypoints:
+        if (fr, tid) not in kept:
+            continue
+        pts = []
+        for j in range(0, len(flat), 3):
+            x, y, v = flat[j] * sx, flat[j + 1] * sy, flat[j + 2]
+            if not (0.0 <= x <= W and 0.0 <= y <= H):
+                v = 0.0                                  # outside the image after scaling/cropping -> not labelled
+            pts += [x, y, v]
+        krows.append((fr, tid, pts))
     irows = []
     for i, (fr, x, y, w, h) in enumerate(seq.ignore):
         if not (1 <= fr <= n):
@@ -164,10 +178,10 @@ def build_output_rows(seq: Sequence, scale, out_wh, min_box):
         x, y, w, h = _clip(x * sx, y * sy, w * sx, h * sy, W, H)
         if w >= min_box and h >= min_box:
             irows.append((fr, IGNORE_ID_BASE + i, x, y, w, h))
-    return rows, drows, irows
+    return rows, drows, irows, krows
 
 
-def write_gt(seq_dir, rows, drows, irows, n_frames, out_wh, fps, ext, name):
+def write_gt(seq_dir, rows, drows, irows, n_frames, out_wh, fps, ext, name, krows=(), static=False):
     os.makedirs(os.path.join(seq_dir, "gt"), exist_ok=True)
     W, H = out_wh
     f = lambda v: f"{v:.2f}"
@@ -178,9 +192,13 @@ def write_gt(seq_dir, rows, drows, irows, n_frames, out_wh, fps, ext, name):
             gc.write(f"{fr},{tid},{f(x)},{f(y)},{f(w)},{f(h)},1,{cls},{vis}\n")      # training: real class index
         for fr, tid, x, y, w, h in list(drows) + list(irows):                        # distractors / ignore -> class 8
             g.write(f"{fr},{tid},{f(x)},{f(y)},{f(w)},{f(h)},1,{DISTRACTOR_CLASS},1\n")
+    if krows:
+        with open(os.path.join(seq_dir, "gt", "gt_keypoints.txt"), "w") as gk:
+            for fr, tid, pts in krows:
+                gk.write(f"{fr},{tid}," + ",".join(f"{v:.2f}" if j % 3 != 2 else f"{v:g}" for j, v in enumerate(pts)) + "\n")
     with open(os.path.join(seq_dir, "seqinfo.ini"), "w") as f_:
         f_.write(f"[Sequence]\nname={name}\nimDir=img1\nframeRate={int(round(fps)) or 1}\nseqLength={n_frames}\n"
-                 f"imWidth={W}\nimHeight={H}\nimExt={ext}\n")
+                 f"imWidth={W}\nimHeight={H}\nimExt={ext}\n" + ("isStatic=1\n" if static else ""))
 
 
 def convert_sequence(seq: Sequence, root: str, a, pool: ThreadPoolExecutor | None):
@@ -205,7 +223,7 @@ def convert_sequence(seq: Sequence, root: str, a, pool: ThreadPoolExecutor | Non
                 W, H = W0, H0
         out_wh = out_size(W, H, a.resize_short, a.max_long) if mode == "jpeg" else (W, H)
         scale = (out_wh[0] / W, out_wh[1] / H)
-        rows, drows, irows = build_output_rows(seq, scale, out_wh, a.min_box)
+        rows, drows, irows, krows = build_output_rows(seq, scale, out_wh, a.min_box)
         if not rows:
             rec["warnings"].append("no target boxes -> skipped")
             return rec
@@ -229,7 +247,7 @@ def convert_sequence(seq: Sequence, root: str, a, pool: ThreadPoolExecutor | Non
                 jobs = [(src, os.path.join(img_dir, f"{i + 1:08d}{ext}"), mode, size, a.jpeg_quality)
                         for i, src in enumerate(seq.images)]
                 list(pool.map(_emit_image, jobs)) if pool else [ _emit_image(j) for j in jobs]
-                write_gt(seq_dir, rows, drows, irows, n, out_wh, seq.fps, ext, seq.name)
+                write_gt(seq_dir, rows, drows, irows, n, out_wh, seq.fps, ext, seq.name, krows, seq.static)
                 open(marker, "w").write("ok\n")
         rec["ok"] = True
     except Exception as e:                                     # noqa: BLE001 - report, keep going

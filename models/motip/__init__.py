@@ -55,8 +55,16 @@ def build(config: dict):
                 size=config["MODEL_SIZE"], num_classes=config["NUM_CLASSES"],
                 num_queries=config["DETR_NUM_QUERIES"], num_denoising=config.get("DEIM_NUM_DENOISING", 100),
                 anchor_source=config.get("SPATIAL_ANCHOR_SOURCE", "layer_input"),
+                num_keypoints=int(config.get("NUM_KEYPOINTS", 0) or 0),
+                keypoint_hidden_layers=int(config.get("KEYPOINT_HIDDEN_LAYERS", 4)),
             )
-            detr_criterion = build_detection_criterion(num_classes=config["NUM_CLASSES"])
+            detr_criterion = build_detection_criterion(
+                num_classes=config["NUM_CLASSES"], num_keypoints=int(config.get("NUM_KEYPOINTS", 0) or 0),
+                keypoint_loss_weights=tuple(config.get("KEYPOINT_LOSS_WEIGHTS") or (10.0, 3.0, 35.0)),
+                keypoint_sigmas=config.get("KEYPOINT_SIGMAS"),
+                keypoint_labeled_values=tuple(config.get("KEYPOINT_LABELED_VALUES") or (1, 2)),
+                keypoint_visible_values=tuple(config.get("KEYPOINT_VISIBLE_VALUES") or (2,)),
+            )
         case _:
             raise NotImplementedError(f"DETR framework {detr_framework} is not supported.")
 

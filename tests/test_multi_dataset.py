@@ -181,6 +181,10 @@ def test_gen_mix_config_writes_consistent_configs_and_warns(tmp_path, capsys):
     cfgs, _ = G.main(["--name", "c", "--datasets", "UA_DETRAC", "--from-coco", "--class-set", "vehicles5_person", "--out-dir",
                       str(tmp_path), "--no-check-data"])
     assert cfgs[1]["DETR_CLASS_INDICES"] == [1, 2, 3, 5, 7, 0] and cfgs[1]["NUM_CLASSES"] == 6
+    assert cfgs[1]["NUM_KEYPOINTS"] == 0
+    cfgs, _ = G.main(["--name", "k", "--datasets", "Vehicles", "COCOKeypoints", "--num-keypoints", "31", "--out-dir", str(tmp_path),
+                      "--no-check-data"])
+    assert cfgs[2]["NUM_KEYPOINTS"] == 31
 
 
 def test_gen_mix_config_rejects_bad_mix(tmp_path):

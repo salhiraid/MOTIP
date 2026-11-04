@@ -11,7 +11,7 @@ import pytest
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 
-DOCS = ["README_MOTIP2.md", "docs/MOTIP2.md", "docs/VEHICLES.md", "docs/DATASETS.md"]
+DOCS = ["README_MOTIP2.md", "docs/MOTIP2.md", "docs/VEHICLES.md", "docs/DATASETS.md", "docs/DEPLOY_ORIN.md", "docs/KEYPOINTS.md"]
 
 
 def extract_commands(md_path):

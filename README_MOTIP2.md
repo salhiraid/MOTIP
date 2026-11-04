@@ -123,6 +123,17 @@ python tools/gen_mix_config.py --name mix_a --size S --datasets Vehicles UA_DETR
 Status: tested on synthetic files in each dataset's native format and on a CPU training run; **not** run on the real downloads (no access
 here), and no accuracy claim is made for any mixture.
 
+## 2d. Keypoints and Jetson Orin export (added later)
+
+* **Per-detection keypoints** (your 31 vehicle keypoints, ported from the mmdet D-FINE branch: bbox-anchored local coordinates, visibility,
+  L1 + BCE + OKS losses on the detection-matched query): `NUM_KEYPOINTS`, configs `configs/motip2/*_vehicles_kp.yaml`, converter
+  support for your `kps_xy_branches` / `kps_vis_branches`, COCO-keypoint image converter (`tools/prepare_dataset.py cocokp`), tracker
+  output `keypoints/<seq>.txt`. Guide **and the review of the code you pasted** (a batch-dependent visibility target, flip without
+  left/right swap, ...): **[docs/KEYPOINTS.md](./docs/KEYPOINTS.md)**.
+* **ONNX for S and M → TensorRT FP16/INT8 on the Orin**: `bash tools/export_orin.sh` (detector and ID decoder as separate graphs,
+  operator list and verification in `export_meta.json`); how to choose the fixed detector resolution, `trtexec` procedure and what is
+  *not* verified (no TensorRT/Jetson here): **[docs/DEPLOY_ORIN.md](./docs/DEPLOY_ORIN.md)**.
+
 ## 3. Installation
 
 ```bash

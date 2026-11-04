@@ -8,11 +8,12 @@ import torch.nn as nn
 from utils.nested_tensor import NestedTensor
 
 _LIGHT_KEYS = ("pred_logits", "pred_boxes", "outputs", "pos_embeds")
+_KP_KEYS = ("pred_keypoints", "pred_keypoint_vis")
 
 
 class DEIMDetector(nn.Module):
     # Attribute names `backbone`, `encoder`, `decoder` match upstream DEIM so COCO checkpoints load by key.
-    def __init__(self, backbone, encoder, decoder, anchor_source: str = "layer_input"):
+    def __init__(self, backbone, encoder, decoder, anchor_source: str = "layer_input", keypoint_head=None):
         super().__init__()
         assert anchor_source in ("layer_input", "final_box")
         self.backbone = backbone
@@ -20,6 +21,8 @@ class DEIMDetector(nn.Module):
         self.decoder = decoder
         self.anchor_source = anchor_source
         self.hidden_dim = decoder.hidden_dim
+        # Optional per-detection keypoints (models/deim/keypoints.py); None = plain DEIM.
+        self.keypoint_head = keypoint_head
 
     def forward(self, samples: NestedTensor, targets=None, lightweight: bool = False):
         """
@@ -42,6 +45,9 @@ class DEIMDetector(nn.Module):
         if self.anchor_source == "final_box":
             # N1(b): embed the final box itself with the detector's own positional MLP.
             out["pos_embeds"] = self.decoder.box_to_pos_embed(out["pred_boxes"].detach())
+        if self.keypoint_head is not None and not lightweight:
+            # keypoints decoded inside the SAME final box of each query (box detached), from the same e_i the ID decoder reads
+            out["pred_keypoints"], out["pred_keypoint_vis"] = self.keypoint_head(out["outputs"], out["pred_boxes"])
         if lightweight:
             out = {k: out[k] for k in _LIGHT_KEYS}
         return out
@@ -51,12 +57,16 @@ class DetectionCriterion(nn.Module):
     """Wraps DEIMCriterion; returns (loss_dict, final_layer_indices) like MOTIP's SetCriterion.
     DEIMCriterion already applies its weight_dict, so `total()` just sums."""
 
-    def __init__(self, deim_criterion):
+    def __init__(self, deim_criterion, keypoint_loss=None):
         super().__init__()
         self.deim = deim_criterion
+        self.keypoint_loss = keypoint_loss          # models.deim.keypoints.KeypointLoss | None
 
     def forward(self, outputs, targets):
         losses = self.deim(outputs, targets)
+        if self.keypoint_loss is not None and "pred_keypoints" in outputs:
+            # supervised on the queries the detection matching selected for the last layer (no second matching)
+            losses.update(self.keypoint_loss(outputs, targets, self.deim.last_indices))
         return losses, self.deim.last_indices
 
     @torch.no_grad()
@@ -112,6 +122,15 @@ def load_deim_pretrain(model: nn.Module, path: str = None, default_class_idx: in
     for k in dropped:
         new_state.pop(k)
     missing = [k for k in model_state if k not in new_state]
+    # a detector without keypoints (COCO / older checkpoints) can initialise a model that has a keypoint head: the head
+    # then starts from random weights (it is trained by the keypoint losses, or converted from an mmdet checkpoint)
+    kp_missing = [k for k in missing if k.startswith("keypoint_head.")]
+    if kp_missing:
+        import warnings
+        warnings.warn(f"{len(kp_missing)} keypoint_head tensors not in the checkpoint: keypoint head is randomly initialised")
+        for k in kp_missing:
+            new_state[k] = model_state[k]
+        missing = [k for k in missing if k not in kp_missing]
     assert not missing, f"Missing keys in checkpoint: {missing[:5]}"
     model.load_state_dict(new_state, strict=True)
     return dropped

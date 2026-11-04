@@ -4,6 +4,7 @@
     python tools/prepare_dataset.py <dataset> --root <downloaded dataset> --out ./datasets [options]
 
 datasets: bdd100k detrac visdrone uavdt kitti cityflow fasttracker (any MOT-format data) waymo nuscenes argoverse2 boxes3d
+          cocokp (COCO-style images with keypoints)
 Run with --dry-run first: it reads the annotations only and prints class/size/ID statistics and the recommended
 NUM_ID_VOCABULARY.  See docs/DATASETS.md for per-dataset details, licences and caveats.
 """
@@ -16,7 +17,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 MODULES = {"bdd100k": "bdd100k", "detrac": "detrac", "visdrone": "visdrone", "uavdt": "uavdt", "kitti": "kitti",
            "cityflow": "cityflow", "fasttracker": "mot_format", "mot": "mot_format", "waymo": "waymo",
-           "nuscenes": "nuscenes", "argoverse2": "argoverse2", "boxes3d": "boxes3d_generic"}
+           "nuscenes": "nuscenes", "argoverse2": "argoverse2", "boxes3d": "boxes3d_generic",
+           "cocokp": "coco_keypoints"}
 
 
 def main(argv=None):
@@ -38,6 +40,8 @@ def main(argv=None):
     if a.dataset == "mot" and not a.dir_name:
         raise SystemExit("--dir-name is required for the generic 'mot' converter")
     class_map = common.load_class_map(m.DEFAULT_MAP, a.class_map)
+    if hasattr(m, "MIN_FRAMES"):                  # still-image datasets: 1-frame sequences
+        a.min_frames = m.MIN_FRAMES
     print(f"{a.dataset}: licence note: {m.LICENSE}" if hasattr(m, "LICENSE") else a.dataset)
     names = common.class_names(a.class_set)
     ann = getattr(m, "ANNOTATED", None)          # [] = class-less/coarse labels, "data" = classes present, None = from the map

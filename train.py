@@ -740,6 +740,9 @@ def deim_detr_forward(model, detr_criterion, images, annotations, device, num_tr
     flat = lambda ts: [b * _T + t for b in range(_B) for t in ts]
     train_flat, ng_flat = flat(train_t), flat(ng_t)
     targets_all = annotations_to_flatten_detr_targets(annotations=annotations, device=device)
+    _H, _W = images.tensors.shape[-2:]
+    for _t in targets_all:                      # pixel size of the (batch-scaled) frames: needed by the keypoint OKS loss
+        _t["size_wh"] = torch.tensor([_W, _H], dtype=torch.float32, device=device)
     x = einops.rearrange(images.tensors, "b t c h w -> (b t) c h w")
     m = einops.rearrange(images.mask, "b t h w -> (b t) h w")
 
@@ -785,6 +788,9 @@ def annotations_to_flatten_detr_targets(annotations: list, device):
             }
             if "class_mask" in ann:         # multi-dataset training: classes this frame's dataset annotates
                 target["class_mask"] = ann["class_mask"].to(device)
+            if "keypoints" in ann:          # normalised xy (N,K,2) and GT visibility values (N,K); v=0 = not labelled
+                target["keypoints"] = ann["keypoints"].to(device)
+                target["keypoints_vis"] = ann["keypoints_vis"].to(device)
             targets.append(target)
     return targets
 

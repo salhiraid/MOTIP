@@ -44,6 +44,12 @@ BASE = {
     "DATASET_MIX": None,               # multi-dataset: fraction of each epoch drawn from each dataset (tools/gen_mix_config.py)
     "DATASET_MAX_INTERVALS": None,     # multi-dataset: per-dataset cap of the random frame interval (low-fps data: 1)
     "CLASS_MASKING": False,            # multi-dataset: no classification loss for classes a dataset does not annotate
+    # --- per-detection keypoints (models/deim/keypoints.py); 0 = off ---
+    "NUM_KEYPOINTS": 0, "KEYPOINT_HIDDEN_LAYERS": 4, "KEYPOINT_LOSS_WEIGHTS": [10.0, 3.0, 35.0],   # xy L1, visibility BCE, OKS
+    "KEYPOINT_SIGMAS": None,           # per-keypoint OKS sigmas (list of K) | None = 0.05 for all
+    "KEYPOINT_LABELED_VALUES": [1, 2], # GT visibility values whose xy is supervised (COCO: 1 occluded, 2 visible)
+    "KEYPOINT_VISIBLE_VALUES": [2],    # GT values whose visibility target is 1
+    "KEYPOINT_FLIP_PAIRS": None,       # [[left_idx, right_idx], ...]; horizontal flip is DISABLED with keypoints when None
     "AUG_PIPELINE": "motip2", "AUG_BASE_SIZE": 800, "AUG_MAX_SIZE": 1440, "AUG_MULTISCALE": True,
     "AUG_MAX_SHIFT_RATIO": 0.06, "AUG_OVERFLOW_BBOX": False,
     "AUG_NUM_GROUPS": 6, "AUG_TRAJECTORY_OCCLUSION_PROB": 0.5, "AUG_TRAJECTORY_SWITCH_PROB": 0.5,
@@ -94,6 +100,10 @@ BENCHES = {
     # Training in-loop evaluation uses the small `valmini` split; the final numbers use `--inference-split val`.
     "vehicles": dict(DATASETS=["Vehicles"], DATASET_SPLITS=["train"], T=30, K=50, DET=0.3, NEWBORN=0.7,
                      INFERENCE_DATASET="Vehicles", INFERENCE_SPLIT="valmini", NUM_CLASSES=5),
+    # Same, with the 31-keypoint vehicle head (models/deim/keypoints.py). The head is always built; keypoint losses only act on
+    # objects that have keypoint labels (gt/gt_keypoints.txt), so it also works on box-only tracking data.
+    "vehicles_kp": dict(DATASETS=["Vehicles"], DATASET_SPLITS=["train"], T=30, K=50, DET=0.3, NEWBORN=0.7,
+                        INFERENCE_DATASET="Vehicles", INFERENCE_SPLIT="valmini", NUM_CLASSES=5, NUM_KEYPOINTS=31),
 }
 
 
@@ -109,7 +119,7 @@ def compose(size: str, bench: str, stage: int) -> dict:
         "MISS_TOLERANCE": b["T"], "DET_THRESH": b["DET"], "NEWBORN_THRESH": b["NEWBORN"],
         "INFERENCE_DATASET": b["INFERENCE_DATASET"], "INFERENCE_SPLIT": b["INFERENCE_SPLIT"],
         "LR": lr, "LR_BACKBONE_SCALE": bb, "WEIGHT_DECAY": wd, "BASE_SIZE_REPEAT": repeat,
-        "NUM_CLASSES": b.get("NUM_CLASSES", 1),
+        "NUM_CLASSES": b.get("NUM_CLASSES", 1), "NUM_KEYPOINTS": b.get("NUM_KEYPOINTS", 0),
     })
     if stage == 1:     # detector pretraining on the tracking dataset (single frames), no warmup, EMA warmup 0
         cfg.update({
@@ -119,7 +129,7 @@ def compose(size: str, bench: str, stage: int) -> dict:
             "DETR_PRETRAIN": f"./pretrains/deim_hgnetv2_{size.lower()}_coco.pth",
             "SAVE_CHECKPOINT_PER_EPOCH": 5,
         })
-        if bench == "vehicles":
+        if bench in ("vehicles", "vehicles_kp"):
             # start from the user's own vehicle detector, converted by tools/vehicles/convert_mmdet_deim.py
             # (5 classes already). With official COCO weights instead use: --detr-pretrain <coco.pth>
             # --detr-class-indices 1 2 3 5 7   (COCO-80 rows of bicycle, car, motorcycle, bus, truck)

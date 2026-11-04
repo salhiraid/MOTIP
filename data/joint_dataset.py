@@ -60,6 +60,9 @@ class JointDataset(Dataset):
         # `class_masking`: attach to every annotation the mask of classes its dataset annotates (see the DEIM criterion).
         self.class_masking = kwargs.get("class_masking", False)
         self.num_classes = kwargs.get("num_classes", 1)
+        # `num_keypoints` > 0: every annotation carries `keypoints` (N,K,2) / `keypoints_vis` (N,K); datasets without keypoint
+        # labels get zeros (visibility 0 = not labelled -> no keypoint loss). Filled lazily to save memory.
+        self.num_keypoints = int(kwargs.get("num_keypoints", 0) or 0)
         self.class_masks = defaultdict(dict)        # [dataset][split] -> float tensor [num_classes] | None
 
         # Load the datasets into "sequence_infos", "image_paths", and "annotations",
@@ -195,6 +198,15 @@ class JointDataset(Dataset):
         metas[0]["is_begin"] = True     # the first frame is the beginning of a video clip
         # Deep copy:
         annotations = [copy.deepcopy(annotation) for annotation in annotations]
+        if self.num_keypoints > 0:
+            for annotation in annotations:
+                if "keypoints" not in annotation:
+                    n = len(annotation["id"])
+                    annotation["keypoints"] = torch.zeros(n, self.num_keypoints, 2)
+                    annotation["keypoints_vis"] = torch.zeros(n, self.num_keypoints)
+                elif annotation["keypoints"].shape[1] != self.num_keypoints:
+                    raise ValueError(f"{dataset}: {annotation['keypoints'].shape[1]} keypoints per object in the labels but "
+                                     f"NUM_KEYPOINTS={self.num_keypoints}")
         metas = [copy.deepcopy(meta) for meta in metas]
 
         # Apply transforms:

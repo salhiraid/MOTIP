@@ -85,6 +85,7 @@ def build(a):
         cfg["DATASET_MIX"] = [float(m) for m in mix]
         cfg["DATASET_MAX_INTERVALS"] = caps
         cfg["CLASS_MASKING"] = True
+        cfg["NUM_KEYPOINTS"] = a.num_keypoints
         cfg["DATA_ROOT"] = a.data_root
         if stage == 1:
             if a.from_coco:
@@ -115,6 +116,7 @@ def main(argv=None):
     ap.add_argument("--newborn-thresh", type=float, default=0.7)
     ap.add_argument("--eval-dataset", default=None, help="in-training evaluation dataset (default: the first one)")
     ap.add_argument("--eval-split", default="valmini")
+    ap.add_argument("--num-keypoints", type=int, default=0, help="per-detection keypoints (e.g. 31); needs labelled data, see docs/KEYPOINTS.md")
     ap.add_argument("--from-coco", action="store_true", help="stage 1 starts from official COCO DEIM weights (class rows sliced)")
     ap.add_argument("--detr-pretrain", default=None)
     ap.add_argument("--no-check-data", dest="check_data", action="store_false")

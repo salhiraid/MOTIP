@@ -16,6 +16,7 @@ def build_dataset(config: dict):
         size_divisibility=config.get("SIZE_DIVISIBILITY", 0),
         class_masking=bool(config.get("CLASS_MASKING", False)),
         num_classes=config.get("NUM_CLASSES", 1),
+        num_keypoints=config.get("NUM_KEYPOINTS", 0),
     )
 
 

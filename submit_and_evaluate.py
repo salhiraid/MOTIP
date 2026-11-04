@@ -250,6 +250,16 @@ def submit_and_evaluate_one_model(
                         f"{bbox[0].item()},{bbox[1].item()},{bbox[2].item()},{bbox[3].item()},"
                         f"1,-1,-1,-1\n"
                     )
+            if not is_fake and any("keypoints" in r for r in sequence_results):
+                # detector with keypoints: frame,id,class,score,x1,y1,p1,x2,y2,p2,... (frame pixels, p = visibility prob.)
+                os.makedirs(os.path.join(outputs_dir, "keypoints"), exist_ok=True)
+                with open(os.path.join(outputs_dir, "keypoints", f"{sequence_name}.txt"), "w") as kp_file:
+                    for t, r in enumerate(sequence_results):
+                        if "keypoints" not in r:
+                            continue
+                        for obj_id, score, category, kp in zip(r["id"], r["score"], r["category"], r["keypoints"]):
+                            kp_file.write(f"{t + 1},{obj_id.item()},{category.item()},{score.item():.4f},"
+                                          + ",".join(f"{v:.2f}" for v in kp.flatten().tolist()) + "\n")
             if not is_fake:
                 os.makedirs(os.path.join(outputs_dir, "tracker"), exist_ok=True)
                 with open(os.path.join(outputs_dir, "tracker", f"{sequence_name}.txt"), "w") as submit_file:
