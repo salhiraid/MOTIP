@@ -1,0 +1,162 @@
+{
+ "config": "configs/motip2/s_vehicles_kp.yaml",
+ "checkpoint": null,
+ "detector_resolution_HW": [
+  800,
+  1440
+ ],
+ "opset": 18,
+ "num_classes": 5,
+ "inference": {
+  "DET_THRESH": 0.3,
+  "NEWBORN_THRESH": 0.7,
+  "ID_THRESH": 0.1,
+  "MISS_TOLERANCE": 30,
+  "N_INIT": 2,
+  "N_INIT_TTL": 0,
+  "ROPE_ALPHA": 2.0,
+  "ROPE_ALPHA_MODE": "multiply",
+  "ASSIGNMENT_PROTOCOL": "object-max",
+  "INFERENCE_MAX_SHORTER": 800,
+  "INFERENCE_MAX_LONGER": 1440
+ },
+ "detector": {
+  "file": "detector.onnx",
+  "inputs": [
+   "x"
+  ],
+  "outputs": [
+   "logits",
+   "boxes",
+   "emb",
+   "pos",
+   "kpts",
+   "kpt_vis"
+  ],
+  "hidden_dim": 256,
+  "num_keypoints": 31,
+  "onnx_ops": [
+   "Add",
+   "And",
+   "Cast",
+   "Clip",
+   "Concat",
+   "Conv",
+   "Cos",
+   "Div",
+   "Erf",
+   "Expand",
+   "Gather",
+   "GatherElements",
+   "Gemm",
+   "Greater",
+   "GridSample",
+   "LayerNormalization",
+   "Less",
+   "Log",
+   "MatMul",
+   "Max",
+   "MaxPool",
+   "Min",
+   "Mul",
+   "Pad",
+   "ReduceMax",
+   "ReduceMean",
+   "ReduceMin",
+   "ReduceSum",
+   "Relu",
+   "Reshape",
+   "Resize",
+   "Sigmoid",
+   "Sin",
+   "Slice",
+   "Softmax",
+   "Split",
+   "Squeeze",
+   "Sub",
+   "Tile",
+   "TopK",
+   "Transpose",
+   "Unsqueeze",
+   "Where"
+  ],
+  "preprocessing": "RGB, float32, x/255 in [0,1], NO mean/std normalisation; resize/pad the frame to (H, W) = detector_resolution_HW",
+  "opset_in_file": 18
+ },
+ "id_decoder": {
+  "file": "id_decoder.onnx",
+  "inputs": [
+   "traj_feat",
+   "traj_pos",
+   "traj_ids",
+   "traj_times",
+   "traj_masks",
+   "unk_feat",
+   "unk_pos",
+   "unk_masks",
+   "unk_times"
+  ],
+  "outputs": [
+   "logits"
+  ],
+  "dim": 256,
+  "K": 50,
+  "onnx_ops": [
+   "Add",
+   "And",
+   "Cast",
+   "Concat",
+   "ConstantOfShape",
+   "Cos",
+   "Div",
+   "Erf",
+   "Expand",
+   "Gather",
+   "GatherND",
+   "Gemm",
+   "GreaterOrEqual",
+   "IsNaN",
+   "LayerNormalization",
+   "MatMul",
+   "Mul",
+   "Not",
+   "Pad",
+   "Reshape",
+   "Shape",
+   "Sin",
+   "Slice",
+   "Softmax",
+   "Split",
+   "Squeeze",
+   "Sub",
+   "Transpose",
+   "Unsqueeze",
+   "Where"
+  ],
+  "opset_in_file": 18,
+  "spatial_anchor": true,
+  "dynamic_axes": {
+   "T": [
+    2,
+    64
+   ],
+   "N": [
+    1,
+    300
+   ],
+   "M": [
+    1,
+    300
+   ]
+  }
+ },
+ "verification": {
+  "detector": {
+   "boxes_found": 1.0,
+   "max_diff_matched": 2.384185791015625e-06
+  },
+  "id_decoder": {
+   "max_diff": 2.86102294921875e-06
+  }
+ }
+}
